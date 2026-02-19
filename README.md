@@ -173,3 +173,7 @@ How it works:
 - **Economy sections showing "loading..." forever:** Economy endpoints may be rate-limited. They space calls 15s apart and will populate within ~45s of startup if the API allows.
 - **"Rate limited" in header:** Fintra auto-backs off to 4x the configured interval (max 120s) and recovers when limits clear.
 - **Terminal broken after exit:** Should not happen (terminal settings are saved/restored), but run `reset` if it does.
+
+---
+
+Built with [Claude Code](https://claude.ai/claude-code).

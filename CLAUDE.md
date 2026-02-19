@@ -1,5 +1,9 @@
 # Fintra — Implementation Reference
 
+## Git Commits
+
+Do NOT include `Co-Authored-By` trailers in commit messages. Attribution is in the README.
+
 ## File Layout
 
 ```
