@@ -158,7 +158,10 @@ Run with: `python -m fintra`
 
 ## Known Bugs
 
-- Second crypto ticker disappears and reappears — likely a race condition in `fetch_crypto_data()` where `state.crypto` gets overwritten mid-build since each ticker fetches sequentially with `time.sleep(1)` between calls
-- Crypto can flicker or go blank if rate limit exceeded with too many tickers
 - Economy "loading..." can persist ~45s on startup due to 15s spacing between API calls
 - `indicesGroups` from `get_market_status()` can report groups as "open" when indices are not actually updating; indices use `market_is_open` (overall US market status) instead
+
+## TODO
+
+- **Watchlist switcher** — press `l` to show a list of available watchlist files, select one to swap the active view; support multiple `.txt` watchlists in the project directory
+- **CLI install** — add `pyproject.toml` with a `[project.scripts]` entry so `pip install .` creates a `fintra` command runnable from anywhere
