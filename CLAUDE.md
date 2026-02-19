@@ -1,84 +1,82 @@
-# Fintra — Implementation Plan & Status
+# Fintra — Implementation Reference
 
-## Current Status
+## File Layout
 
-**All files created, venv installed, tested with real API key.**
-
-| File | Status | Notes |
-|------|--------|-------|
-| `fintra.py` | Done | ~730 lines, REST + WebSocket hybrid |
-| `config.ini` | Done | 10s market, 1d economy defaults |
-| `watchlist.txt` | Done | AAPL/MSFT/NVDA, BTC/ETH, SPX/DJI/NDX/VIX |
-| `requirements.txt` | Done | massive, rich |
-| `setup.sh` | Done | Executable, creates venv + installs deps |
-| `README.md` | Done | Setup, config, usage docs |
-| `.gitignore` | Done | venv/, .env, __pycache__/ |
+| File | Purpose |
+|------|---------|
+| `fintra.py` | Single-file app (~850 lines), all logic |
+| `config.ini` | Refresh intervals (10s market, 1d economy) |
+| `watchlist.txt` | Ticker lists by section (equities, crypto, indices) |
+| `.env` | `MASSIVE_API_KEY=...` (gitignored) |
+| `requirements.txt` | `massive`, `rich` |
+| `setup.sh` | Creates venv, installs deps |
 
 ## Architecture (fintra.py)
 
-1. **Constants** — paths, display names, yield field mappings
-2. **`parse_interval()`** / **`parse_config()`** — reads config.ini, supports `10s`/`1m`/`1h`/`1d`
-3. **`parse_watchlist()`** — reads watchlist.txt into `{equities: [], crypto: [], indices: []}`
-4. **`DashboardState` dataclass** — all data, timestamps, prev_closes cache, ws_connected flag
-5. **Formatting helpers** — `fmt_price`, `fmt_change`, `fmt_pct`, `fmt_volume`, `fmt_yield_val`
-6. **`normalize_snapshot()`** — converts REST snapshot objects to flat dicts
-7. **`fetch_market_data()`** — REST: `list_universal_snapshots` for stocks/indices (as list), `get_aggs` for crypto with change calc from 3-day range
-8. **`fetch_economy_data()`** — REST with 10s timeout wrapper: treasury, labor, inflation
-9. **WebSocket streaming** — `start_ws_feeds()` launches background threads:
-   - Stocks: `A.*` second aggregates on `Feed.Delayed`
-   - Indices: `V.*` index values on `Feed.Delayed`
-   - Crypto: REST-only (WS not entitled on free plan)
-10. **Table builders** — equities, crypto, indices, treasury, economy panels
-11. **`make_header()`** — market status (via `get_market_status()` API), WS/REST indicator, refresh time
-12. **`build_layout()`** — Rich Layout: header + 3 market sections + bottom split (treasury | economy)
-13. **`key_listener()`** — background thread using tty/termios for 'q' quit
-14. **`main()`** — REST baseline fetch → start WS feeds → Live rendering loop with REST fallback polling
+Components in order:
 
-## Data Flow
+1. **Constants** — `CONFIG_PATH`, `WATCHLIST_PATH`, `DISPLAY_NAMES`, `YIELD_FIELDS`
+2. **`parse_interval()`** — converts `10s`/`1m`/`1h`/`1d` to seconds
+3. **`parse_config()`** — reads config.ini, returns `(refresh_seconds, economy_seconds)`
+4. **`parse_watchlist()`** — reads watchlist.txt into `{equities: [], crypto: [], indices: []}`
+5. **`DashboardState` dataclass** — shared mutable state:
+   - `equities`, `crypto`, `indices` — lists of flat dicts with `ticker`, `name`, `last`, `change`, `change_pct`, `open`, `high`, `low`, `volume`
+   - `treasury`, `labor`, `inflation` — dicts of latest values + `date` key
+   - `prev_closes` — cached previous session closes for WS change calc
+   - `market_updated`, `crypto_updated`, `economy_updated` — timestamps
+   - `market_is_open`, `ws_connected`, `rate_limited`, `quit_flag` — flags
+6. **Formatting helpers** — `fmt_price`, `fmt_change`, `fmt_pct`, `fmt_volume`, `fmt_yield_val`
+7. **`normalize_snapshot()`** — converts REST snapshot to flat dict; tries `session.close`, then `last_trade.price`, then `last_quote` midpoint, then top-level `price`/`value`
+8. **`fetch_market_data()`** — REST: `list_universal_snapshots(ticker_any_of=<list>)` for stocks+indices. Only overwrites state if data was returned. Caches `prev_closes` by deriving `close - change`.
+9. **`fetch_crypto_data()`** — REST: `get_aggs(ticker, 1, "day", 3_days_ago, today)` per ticker. Rate-limited internally: `min_interval = max(num_tickers * 12, 15)` seconds. 1s delay between individual ticker calls. Never blanks existing data on failure.
+10. **`_fetch_with_timeout()`** — wraps a callable in a thread with configurable timeout (default 10s) to prevent hanging on 429 retry loops
+11. **`fetch_economy_data()`** — 3 sequential REST calls with 15s delays between them:
+    - `list_treasury_yields` → `state.treasury` (yield curves + date)
+    - `list_labor_market_indicators` → `state.labor` (unemployment, participation, avg hourly earnings + date)
+    - `list_inflation` → `state.inflation` (CPI, core CPI + date)
+    - Uses `next(iter(...))` NOT `list()` — `list()` triggers pagination and burns the entire rate limit
+12. **`start_ws_feeds()`** — launches background daemon threads:
+    - Stocks: `WebSocketClient(Feed.Delayed, Market.Stocks)` subscribing to `A.<ticker>` (second aggs)
+    - Indices: `WebSocketClient(Feed.Delayed, Market.Indices)` subscribing to `V.<ticker>` (index values)
+    - No crypto WS (free plan not entitled)
+    - `_update_ticker()` helper finds matching dict in state list and updates `last`, recalculates `change`/`change_pct` from `prev_closes`, updates `high`/`low`/`volume`
+13. **Table builders** — each returns a `rich.panel.Panel`:
+    - `build_equities_table` — 8 columns (Symbol, Last, Chg, Chg%, Open, High, Low, Vol)
+    - `build_crypto_table` — 4 columns, title shows "polled Xs ago"
+    - `build_indices_table` — 4 columns
+    - `build_treasury_panel` — 2-column pairs layout (short maturities left, long right)
+    - `build_economy_panel` — single column key-value
+    - Section titles show data freshness (streaming/polled/date)
+14. **`make_header()`** — market open/closed status from `get_market_status()` API
+15. **`build_layout()`** — Rich Layout: header (3 rows) + equities + crypto + indices + bottom split (treasury | economy)
+16. **`key_listener()`** — background thread, `tty.setcbreak()` for 'q' detection
+17. **`main()`**:
+    - Loads `.env` manually (no python-dotenv dependency)
+    - Saves original termios settings, restores on exit (fixes terminal echo after Ctrl+C)
+    - Suppresses urllib3 SSL warning for LibreSSL
+    - Shows dashboard immediately with blank values
+    - Kicks off `_init_market` thread (market status → snapshots → crypto → WS feeds)
+    - Kicks off `fetch_economy_data` thread (3 calls spaced 15s apart)
+    - Main loop: REST polls on `refresh_interval`, crypto polls via rate-limited `fetch_crypto_data`, economy polls on `economy_interval`, renders at 2fps
 
-```
-Startup:
-  REST: list_universal_snapshots → equities + indices (+ cache prev_closes)
-  REST: get_aggs (3-day) → crypto with change calculation
-  REST: treasury/labor/inflation (with 10s timeout for 429 protection)
-  WS: start 2 background threads (stocks + indices)
+## API Compatibility
 
-Running:
-  WS threads update state.equities/indices in real-time (per-second)
-  REST polls on configured interval as safety net
-  Economy data fetched once at startup (1d interval)
-  Rich Live renders layout at 2fps from shared state
-```
+| Feature | Plan Needed | Client Call | Key Gotchas |
+|---------|------------|-------------|-------------|
+| Stock/index snapshots | Stocks/Indices Starter | `list_universal_snapshots(ticker_any_of=<list>)` | Must pass Python list, NOT comma-separated string |
+| Stock WS second aggs | Stocks Starter | `WebSocketClient(Feed.Delayed, Market.Stocks)` → `A.*` | `Feed.StarterFeed` returns "not authorized"; must use `Feed.Delayed` |
+| Index WS values | Indices Starter | `WebSocketClient(Feed.Delayed, Market.Indices)` → `V.*` | Sub-second updates |
+| Crypto daily aggs | Currencies Free | `get_aggs(ticker, 1, "day", from, to)` | 5 calls/min limit; snapshots return NOT_ENTITLED |
+| Treasury yields | Free | `list_treasury_yields(sort="date.desc", limit=1)` | Use `next(iter())` not `list()` — pagination burns rate limit |
+| Labor market | Free | `list_labor_market_indicators(sort="date.desc", limit=1)` | Field is `labor_force_participation_rate` not `participation_rate` |
+| Inflation | Free | `list_inflation(sort="date.desc", limit=1)` | `cpi_year_over_year` and `pce` are None; use raw `cpi` and `cpi_core` |
+| Market status | Free | `get_market_status()` | Returns `market="open"/"closed"` |
 
-## API Plan Compatibility
+## Key Design Decisions
 
-| Feature | Plan | Method |
-|---------|------|--------|
-| Stock snapshots | Stocks Starter ($29) | `list_universal_snapshots` (list param, not string) |
-| Index snapshots | Indices Starter | `list_universal_snapshots` |
-| Stock WS second aggs | Stocks Starter | `WebSocketClient(Feed.Delayed, Market.Stocks)` → `A.*` |
-| Index WS values | Indices Starter | `WebSocketClient(Feed.Delayed, Market.Indices)` → `V.*` |
-| Crypto aggs | Currencies Free | `get_aggs` (daily bars) |
-| Crypto WS | NOT available | Free plan, no WS entitlement |
-| Treasury/Labor/Inflation | Unknown plan | REST with rate limit protection (5 calls/min) |
-
-## Key Findings from Testing
-
-- `list_universal_snapshots` requires a **list**, not comma-separated string (bug in original code)
-- Crypto snapshots return `NOT_ENTITLED` — must use `get_aggs` fallback
-- Economy endpoints hit 429 rate limits aggressively — wrapped with 10s timeout threads
-- WS `Feed.StarterFeed` returns "not authorized" — must use `Feed.Delayed` instead
-- WS second aggregates (`A.*`) fire every ~1s during market hours
-- WS index values (`V.*`) fire sub-second
-- Market status from `get_market_status()` API (replaces manual UTC offset calc)
-
-## Verification
-
-```bash
-cd "/Users/kb/Dropbox (Personal)/Dev/Fintra"
-source venv/bin/activate
-export MASSIVE_API_KEY="your_key"
-python fintra.py
-```
-
-Confirm: header shows "WS" green, stocks/indices update every second, crypto shows daily data, 'q' quits.
+- **Never blank data on failure** — state lists only overwritten when new data is fetched successfully
+- **Background-first startup** — dashboard renders immediately, all API calls happen in background threads
+- **Rate limit awareness** — crypto enforces `num_tickers * 12s` minimum interval; economy spaces calls 15s apart; REST polls back off 4x on 429
+- **WS as enhancement, REST as baseline** — WS provides per-second updates; REST polls on configured interval as safety net
+- **No python-dotenv dependency** — `.env` loaded with simple manual parser in `main()`
+- **Terminal safety** — original termios saved at startup, restored in `finally` block to prevent broken terminal on Ctrl+C

@@ -43,7 +43,6 @@ DISPLAY_NAMES = {
 YIELD_FIELDS = [
     ("1M", "yield_1_month"),
     ("3M", "yield_3_month"),
-    ("6M", "yield_6_month"),
     ("1Y", "yield_1_year"),
     ("2Y", "yield_2_year"),
     ("5Y", "yield_5_year"),
@@ -117,6 +116,7 @@ class DashboardState:
     inflation: Dict[str, Optional[float]] = field(default_factory=dict)
 
     market_updated: Optional[float] = None
+    crypto_updated: Optional[float] = None
     economy_updated: Optional[float] = None
 
     market_stale: bool = False
@@ -254,88 +254,102 @@ def _normalize_crypto_agg(agg: Any, prev_agg: Any, ticker: str) -> Dict[str, Any
 
 
 def fetch_market_data(client: RESTClient, watchlist: Dict[str, List[str]], state: DashboardState):
-    """Fetch snapshots for all tickers in one unified call."""
+    """Fetch snapshots for stocks/indices in one unified call."""
     stock_index_tickers = watchlist["equities"] + watchlist["indices"]
-    crypto_tickers = watchlist["crypto"]
 
-    if not stock_index_tickers and not crypto_tickers:
+    if not stock_index_tickers:
         return
 
-    # Fetch stocks + indices via universal snapshots (pass list, not string)
-    if stock_index_tickers:
+    try:
+        snapshots = list(client.list_universal_snapshots(ticker_any_of=stock_index_tickers))
+        snap_map: Dict[str, Any] = {}
+        for s in snapshots:
+            t = getattr(s, "ticker", None)
+            if t and not getattr(s, "error", None):
+                snap_map[t] = s
+
+        new_equities = [normalize_snapshot(snap_map[t], t) for t in watchlist["equities"] if t in snap_map]
+        new_indices = [normalize_snapshot(snap_map[t], t) for t in watchlist["indices"] if t in snap_map]
+
+        # Only overwrite if we got data
+        if new_equities:
+            state.equities = new_equities
+        if new_indices:
+            state.indices = new_indices
+
+        # Cache previous closes for WS change calculations
+        for t, s in snap_map.items():
+            session = getattr(s, "session", None)
+            if session:
+                prev = getattr(session, "previous_close", None)
+                if prev:
+                    state.prev_closes[t] = prev
+                else:
+                    close = getattr(session, "close", None)
+                    change = getattr(session, "change", None)
+                    if close is not None and change is not None:
+                        state.prev_closes[t] = close - change
+
+        state.market_updated = time.time()
+        state.market_stale = False
+        state.market_error = ""
+        state.rate_limited = False
+
+    except Exception as e:
+        err_str = str(e)
+        if "429" in err_str or "rate" in err_str.lower():
+            state.rate_limited = True
+            state.market_error = "Rate limited"
+        else:
+            state.market_error = str(e)[:80]
+        state.market_stale = True
+
+
+# Track last crypto fetch time to enforce rate limiting
+_last_crypto_fetch: float = 0.0
+
+
+def fetch_crypto_data(client: RESTClient, watchlist: Dict[str, List[str]], state: DashboardState):
+    """Fetch crypto via daily aggs, rate-limited to 5 API calls/min max."""
+    global _last_crypto_fetch
+    crypto_tickers = watchlist["crypto"]
+    if not crypto_tickers:
+        return
+
+    # Enforce rate limit: with 5 calls/min budget and 1 call per ticker,
+    # minimum interval = (num_tickers / 5) * 60 seconds
+    min_interval = max(len(crypto_tickers) * 12, 15)  # at least 15s
+    now = time.time()
+    if _last_crypto_fetch and (now - _last_crypto_fetch) < min_interval:
+        return  # too soon, skip this cycle
+    _last_crypto_fetch = now
+
+    from datetime import timedelta
+    today = datetime.now().strftime("%Y-%m-%d")
+    three_days_ago = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
+    crypto_data = []
+    for ticker in crypto_tickers:
         try:
-            snapshots = list(client.list_universal_snapshots(ticker_any_of=stock_index_tickers))
-            snap_map: Dict[str, Any] = {}
-            for s in snapshots:
-                t = getattr(s, "ticker", None)
-                # Skip NOT_ENTITLED tickers
-                if t and not getattr(s, "error", None):
-                    snap_map[t] = s
+            aggs = client.get_aggs(ticker, 1, "day", three_days_ago, today)
+            if aggs and len(aggs) >= 2:
+                cur = aggs[-1]
+                prev = aggs[-2]
+                crypto_data.append(_normalize_crypto_agg(cur, prev, ticker))
+                if prev.close is not None:
+                    state.prev_closes[ticker] = prev.close
+            elif aggs:
+                cur = aggs[-1]
+                crypto_data.append(_normalize_crypto_agg(cur, None, ticker))
+        except Exception:
+            pass
+        # Small delay between calls to avoid bursting
+        time.sleep(1)
 
-            state.equities = [normalize_snapshot(snap_map[t], t) for t in watchlist["equities"] if t in snap_map]
-            state.indices = [normalize_snapshot(snap_map[t], t) for t in watchlist["indices"] if t in snap_map]
-
-            # Cache previous closes for WS change calculations
-            for t, s in snap_map.items():
-                session = getattr(s, "session", None)
-                if session:
-                    prev = getattr(session, "previous_close", None)
-                    if prev:
-                        state.prev_closes[t] = prev
-                    else:
-                        # Derive prev close from current close - change
-                        close = getattr(session, "close", None)
-                        change = getattr(session, "change", None)
-                        if close is not None and change is not None:
-                            state.prev_closes[t] = close - change
-
-            state.market_updated = time.time()
-            state.market_stale = False
-            state.market_error = ""
-            state.rate_limited = False
-
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "rate" in err_str.lower():
-                state.rate_limited = True
-                state.market_error = "Rate limited"
-            else:
-                state.market_error = str(e)[:80]
-            state.market_stale = True
-
-    # Fetch crypto via get_aggs (snapshots not entitled on most plans)
-    # Get last 2 daily bars to calculate change
-    if crypto_tickers:
-        try:
-            from datetime import timedelta
-            today = datetime.now().strftime("%Y-%m-%d")
-            three_days_ago = (datetime.now() - timedelta(days=3)).strftime("%Y-%m-%d")
-            crypto_data = []
-            for ticker in crypto_tickers:
-                try:
-                    aggs = client.get_aggs(ticker, 1, "day", three_days_ago, today)
-                    if aggs and len(aggs) >= 2:
-                        cur = aggs[-1]
-                        prev = aggs[-2]
-                        crypto_data.append(_normalize_crypto_agg(cur, prev, ticker))
-                        # Cache prev close for WS
-                        if prev.close is not None:
-                            state.prev_closes[ticker] = prev.close
-                    elif aggs:
-                        cur = aggs[-1]
-                        crypto_data.append(_normalize_crypto_agg(cur, None, ticker))
-                except Exception:
-                    pass
-
-            state.crypto = crypto_data
-            if not state.market_updated:
-                state.market_updated = time.time()
-
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "rate" in err_str.lower():
-                state.rate_limited = True
-            state.market_stale = True
+    # Only overwrite if we got data — never blank out existing values
+    if crypto_data:
+        state.crypto = crypto_data
+        state.crypto_updated = time.time()
+        state.market_updated = state.market_updated or time.time()
 
 
 def _fetch_with_timeout(fn, timeout=10):
@@ -360,36 +374,43 @@ def _fetch_with_timeout(fn, timeout=10):
 
 
 def fetch_economy_data(client: RESTClient, state: DashboardState):
-    """Fetch treasury yields, labor market, and inflation data."""
+    """Fetch treasury yields, labor market, and inflation data.
+
+    Spaces calls 15s apart to stay within 5 calls/min rate limits.
+    """
     had_error = False
 
-    # Treasury yields
+    # Treasury yields — use next(iter()) to avoid pagination burning rate limit
     try:
-        yields = _fetch_with_timeout(
-            lambda: list(client.list_treasury_yields(sort="date.desc", limit=1))
+        y = _fetch_with_timeout(
+            lambda: next(iter(client.list_treasury_yields(sort="date.desc", limit=1))),
+            timeout=15,
         )
-        if yields:
-            y = yields[0]
+        if y:
             state.treasury = {
                 attr: getattr(y, attr, None) for _, attr in YIELD_FIELDS
             }
+            state.treasury["date"] = getattr(y, "date", None)
     except Exception as e:
         err_str = str(e)
         if "429" not in err_str and "timed out" not in err_str.lower():
             state.economy_error = f"Treasury: {err_str[:60]}"
         had_error = True
 
+    time.sleep(15)  # space calls to avoid 429
+
     # Labor market
     try:
-        labor = _fetch_with_timeout(
-            lambda: list(client.list_labor_market_indicators(sort="date.desc", limit=1))
+        lm = _fetch_with_timeout(
+            lambda: next(iter(client.list_labor_market_indicators(sort="date.desc", limit=1))),
+            timeout=15,
         )
-        if labor:
-            lm = labor[0]
+        if lm:
             state.labor = {
                 "unemployment_rate": getattr(lm, "unemployment_rate", None),
-                "participation_rate": getattr(lm, "participation_rate", None),
-                "nonfarm_payrolls": getattr(lm, "nonfarm_payrolls", None),
+                "participation_rate": getattr(lm, "labor_force_participation_rate", None),
+                "avg_hourly_earnings": getattr(lm, "avg_hourly_earnings", None),
+                "date": getattr(lm, "date", None),
             }
     except Exception as e:
         err_str = str(e)
@@ -397,18 +418,19 @@ def fetch_economy_data(client: RESTClient, state: DashboardState):
             state.economy_error = f"Labor: {err_str[:60]}"
         had_error = True
 
+    time.sleep(15)  # space calls to avoid 429
+
     # Inflation
     try:
-        inf = _fetch_with_timeout(
-            lambda: list(client.list_inflation(sort="date.desc", limit=1))
+        i = _fetch_with_timeout(
+            lambda: next(iter(client.list_inflation(sort="date.desc", limit=1))),
+            timeout=15,
         )
-        if inf:
-            i = inf[0]
+        if i:
             state.inflation = {
-                "cpi_yoy": getattr(i, "cpi_year_over_year", None),
-                "pce": getattr(i, "pce", None),
-                "pce_core": getattr(i, "pce_core", None),
+                "cpi": getattr(i, "cpi", None),
                 "cpi_core": getattr(i, "cpi_core", None),
+                "date": getattr(i, "date", None),
             }
     except Exception as e:
         err_str = str(e)
@@ -498,7 +520,7 @@ def start_ws_feeds(api_key: str, watchlist: Dict[str, List[str]], state: Dashboa
 # ── Table Builders ───────────────────────────────────────────────────────────
 
 def build_equities_table(state: DashboardState) -> Panel:
-    title = "EQUITIES"
+    title = "EQUITIES — 15min delayed, streaming" if state.ws_connected else "EQUITIES — 15min delayed"
     if state.market_stale:
         title += " (stale)"
 
@@ -531,9 +553,15 @@ def build_equities_table(state: DashboardState) -> Panel:
 
 
 def build_crypto_table(state: DashboardState) -> Panel:
-    title = "CRYPTO"
-    if state.market_stale:
-        title += " (stale)"
+    if state.crypto_updated:
+        ago = int(time.time() - state.crypto_updated)
+        if ago < 60:
+            poll_str = f"{ago}s ago"
+        else:
+            poll_str = f"{ago // 60}m ago"
+        title = f"CRYPTO — 15min delayed, polled {poll_str}"
+    else:
+        title = "CRYPTO — 15min delayed"
 
     table = Table(expand=True, box=None, padding=(0, 1))
     table.add_column("Symbol", style="bold white", min_width=10)
@@ -556,7 +584,7 @@ def build_crypto_table(state: DashboardState) -> Panel:
 
 
 def build_indices_table(state: DashboardState) -> Panel:
-    title = "INDICES"
+    title = "INDICES — 15min delayed, streaming" if state.ws_connected else "INDICES — 15min delayed"
     if state.market_stale:
         title += " (stale)"
 
@@ -581,9 +609,10 @@ def build_indices_table(state: DashboardState) -> Panel:
 
 
 def build_treasury_panel(state: DashboardState) -> Panel:
-    title = "TREASURY YIELDS"
-    if state.economy_stale:
-        title += " (stale)"
+    treas_date = state.treasury.get("date", "")
+    title = f"TREASURY YIELDS — {treas_date}" if treas_date else "TREASURY YIELDS"
+    if state.economy_stale and not state.treasury:
+        title = "TREASURY YIELDS — loading..."
 
     table = Table(expand=True, box=None, padding=(0, 1), show_header=False)
     table.add_column("Label", style="bold white", min_width=4)
@@ -613,36 +642,37 @@ def build_treasury_panel(state: DashboardState) -> Panel:
 
 
 def build_economy_panel(state: DashboardState) -> Panel:
-    title = "ECONOMY"
-    if state.economy_stale:
-        title += " (stale)"
+    labor_date = state.labor.get("date", "")
+    inflation_date = state.inflation.get("date", "")
+    date_str = labor_date or inflation_date or ""
+    title = f"ECONOMY — {date_str}" if date_str else "ECONOMY"
+    if state.economy_stale and not state.labor and not state.inflation:
+        title = "ECONOMY — loading..."
 
     table = Table(expand=True, box=None, padding=(0, 1), show_header=False)
-    table.add_column("Indicator", style="bold white", min_width=16)
-    table.add_column("Value", justify="right", min_width=8)
+    table.add_column("Indicator", style="bold white", min_width=18)
+    table.add_column("Value", justify="right", min_width=10)
 
     unemp = state.labor.get("unemployment_rate")
     partic = state.labor.get("participation_rate")
-    cpi = state.inflation.get("cpi_yoy")
-    pce = state.inflation.get("pce")
-    pce_core = state.inflation.get("pce_core")
-    nonfarm = state.labor.get("nonfarm_payrolls")
+    earnings = state.labor.get("avg_hourly_earnings")
+    cpi = state.inflation.get("cpi")
+    cpi_core = state.inflation.get("cpi_core")
 
     def pct_or_dash(val):
         return f"{val:.1f}%" if val is not None else "—"
 
+    def dollar_or_dash(val):
+        return f"${val:,.2f}" if val is not None else "—"
+
     def num_or_dash(val):
-        if val is None:
-            return "—"
-        return f"{val:,.0f}K" if val >= 1000 else f"{val:,.0f}"
+        return f"{val:,.3f}" if val is not None else "—"
 
     table.add_row("Unemployment", pct_or_dash(unemp))
     table.add_row("Participation", pct_or_dash(partic))
-    table.add_row("CPI YoY", pct_or_dash(cpi))
-    table.add_row("PCE", pct_or_dash(pce))
-    table.add_row("Core PCE", pct_or_dash(pce_core))
-    if nonfarm is not None:
-        table.add_row("Nonfarm Payrolls", num_or_dash(nonfarm))
+    table.add_row("Avg Hourly Wage", dollar_or_dash(earnings))
+    table.add_row("CPI", num_or_dash(cpi))
+    table.add_row("Core CPI", num_or_dash(cpi_core))
 
     return Panel(table, title=f"[bold]{title}[/bold]", border_style="magenta")
 
@@ -652,20 +682,10 @@ def build_economy_panel(state: DashboardState) -> Panel:
 def make_header(state: DashboardState) -> Panel:
     now = datetime.now().strftime("%H:%M:%S")
 
-    if state.market_updated:
-        ago = int(time.time() - state.market_updated)
-        if ago < 60:
-            refresh_str = f"{ago}s ago"
-        else:
-            refresh_str = f"{ago // 60}m ago"
-    else:
-        refresh_str = "never"
-
     is_open = state.market_is_open
     market_status = Text("Open", style="bold green") if is_open else Text("Closed", style="bold red")
 
-    ws_status = Text("WS", style="bold green") if state.ws_connected else Text("REST", style="dim")
-    left = Text.assemble("Market: ", market_status, "    ", ws_status, f"    Last: {refresh_str}")
+    left = Text.assemble("Market: ", market_status)
 
     if state.market_error:
         left.append(f"    ⚠ {state.market_error}", style="bold yellow")
@@ -767,41 +787,53 @@ def main():
     print(f"[fintra] Refresh: {refresh_interval}s market, {economy_interval}s economy")
     print(f"[fintra] Watching {total_tickers} tickers")
 
+    # Suppress urllib3 SSL warning for LibreSSL
+    import warnings
+    warnings.filterwarnings("ignore", message=".*urllib3.*OpenSSL.*")
+
     client = RESTClient(api_key=api_key)
     state = DashboardState()
+
+    # Save original terminal settings before key listener changes them
+    _original_termios = None
+    try:
+        import termios as _termios
+        _original_termios = _termios.tcgetattr(sys.stdin.fileno())
+    except Exception:
+        pass
 
     # Start key listener thread
     listener = threading.Thread(target=key_listener, args=(state,), daemon=True)
     listener.start()
 
-    # Fetch market status
-    try:
-        ms = client.get_market_status()
-        state.market_is_open = getattr(ms, "market", "") == "open"
-    except Exception:
-        pass
+    # Show dashboard immediately, populate data in background
+    console = Console()
 
-    # Initial data fetch (REST baseline)
-    fetch_market_data(client, watchlist, state)
-    fetch_economy_data(client, state)
+    # Kick off all data fetches in background threads
+    def _init_market():
+        try:
+            ms = client.get_market_status()
+            state.market_is_open = getattr(ms, "market", "") == "open"
+        except Exception:
+            pass
+        fetch_market_data(client, watchlist, state)
+        fetch_crypto_data(client, watchlist, state)
+        start_ws_feeds(api_key, watchlist, state)
 
-    # Start WebSocket feeds for real-time updates
-    print("[fintra] Starting WebSocket feeds...")
-    start_ws_feeds(api_key, watchlist, state)
+    threading.Thread(target=_init_market, daemon=True).start()
+    threading.Thread(target=fetch_economy_data, args=(client, state), daemon=True).start()
 
     last_market_fetch = time.time()
     last_economy_fetch = time.time()
 
     effective_refresh = refresh_interval
 
-    console = Console()
-
     try:
         with Live(build_layout(state), console=console, screen=True, refresh_per_second=2) as live:
             while not state.quit_flag:
                 now = time.time()
 
-                # Market data refresh
+                # Market data refresh (REST fallback for stocks/indices)
                 if now - last_market_fetch >= effective_refresh:
                     fetch_market_data(client, watchlist, state)
                     last_market_fetch = now
@@ -811,15 +843,17 @@ def main():
                         state.market_is_open = getattr(ms, "market", "") == "open"
                     except Exception:
                         pass
-                    # Handle rate limiting: double interval temporarily
                     if state.rate_limited:
                         effective_refresh = min(refresh_interval * 4, 120)
                     else:
                         effective_refresh = refresh_interval
 
+                # Crypto refresh (rate-limited internally, runs in background)
+                threading.Thread(target=fetch_crypto_data, args=(client, watchlist, state), daemon=True).start()
+
                 # Economy data refresh
                 if now - last_economy_fetch >= economy_interval:
-                    fetch_economy_data(client, state)
+                    threading.Thread(target=fetch_economy_data, args=(client, state), daemon=True).start()
                     last_economy_fetch = now
 
                 live.update(build_layout(state))
@@ -829,6 +863,13 @@ def main():
         pass
     finally:
         state.quit_flag = True
+        # Restore original terminal settings
+        if _original_termios:
+            try:
+                import termios as _termios
+                _termios.tcsetattr(sys.stdin.fileno(), _termios.TCSADRAIN, _original_termios)
+            except Exception:
+                pass
         console.clear()
         print("[fintra] Goodbye.")
 

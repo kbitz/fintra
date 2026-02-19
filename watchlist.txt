@@ -9,6 +9,6 @@ X:ETHUSD
 
 [indices]
 I:SPX
-I:DJI
+I:DJA
 I:NDX
 I:VIX
