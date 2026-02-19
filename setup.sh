@@ -10,4 +10,4 @@ pip install -r requirements.txt
 echo ""
 echo "Setup complete. Activate with: source venv/bin/activate"
 echo "Set your API key:  export MASSIVE_API_KEY='your_key'"
-echo "Run:               python fintra.py"
+echo "Run:               python -m fintra"

@@ -12,3 +12,16 @@ I:SPX
 I:DJA
 I:NDX
 I:VIX
+
+[treasury]
+# Maturities to display: 1M, 3M, 6M, 1Y, 2Y, 5Y, 10Y, 30Y
+3M
+2Y
+10Y
+30Y
+
+[economy]
+# Available: unemployment, participation, avg_hourly_wage, cpi, core_cpi
+unemployment
+cpi
+core_cpi

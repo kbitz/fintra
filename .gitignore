@@ -1,4 +1,5 @@
 venv/
 .env
+.plans.json
 __pycache__/
 *.pyc
