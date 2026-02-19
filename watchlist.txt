@@ -1,0 +1,14 @@
+[equities]
+AAPL
+MSFT
+NVDA
+
+[crypto]
+X:BTCUSD
+X:ETHUSD
+
+[indices]
+I:SPX
+I:DJI
+I:NDX
+I:VIX
