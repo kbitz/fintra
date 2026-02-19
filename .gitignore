@@ -3,3 +3,4 @@ venv/
 .plans.json
 __pycache__/
 *.pyc
+.claude/
