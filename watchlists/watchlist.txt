@@ -2,26 +2,30 @@
 AAPL
 MSFT
 NVDA
+AMZN
+GOOGL
+META
+TSLA
 
 [crypto]
 X:BTCUSD
 X:ETHUSD
 
 [indices]
+# Available: I:SPX, I:DJI, I:DJA, I:NDX, I:COMP, I:VIX, I:RUT
 I:SPX
 I:DJA
 I:NDX
 I:VIX
 
 [treasury]
-# Maturities to display: 1M, 3M, 6M, 1Y, 2Y, 5Y, 10Y, 30Y
+# Maturities: 1M, 3M, 6M, 1Y, 2Y, 5Y, 10Y, 30Y
 3M
 2Y
 10Y
 30Y
 
 [economy]
-# Available: unemployment, participation, avg_hourly_wage, cpi, core_cpi
+# Available: unemployment, participation, avg_hourly_wage, cpi, core_cpi, cpi_yoy
 unemployment
-cpi
-core_cpi
+cpi_yoy

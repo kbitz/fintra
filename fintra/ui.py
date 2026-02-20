@@ -14,7 +14,7 @@ from fintra.constants import (
     ALL_YIELD_FIELDS, DEFAULT_YIELD_KEYS,
     ALL_ECONOMY_FIELDS, DEFAULT_ECONOMY_KEYS,
 )
-from fintra.formatting import fmt_price, fmt_change, fmt_pct, fmt_volume, fmt_yield_val, display_name
+from fintra.formatting import fmt_price, fmt_change, fmt_pct, fmt_volume, fmt_market_cap, fmt_yield_val, display_name
 from fintra.plans import PlanInfo
 from fintra.state import DashboardState
 
@@ -44,6 +44,10 @@ def _cell_value(col_key: str, item: Dict[str, Any], state: DashboardState, large
         return fmt_price(item.get("low"), large=large)
     elif col_key == "vol":
         return fmt_volume(item.get("volume"))
+    elif col_key == "mktcap":
+        ticker = item.get("ticker", "")
+        details = state.ticker_details.get(ticker, {})
+        return fmt_market_cap(details.get("market_cap"))
     elif col_key == "ytd%":
         ticker = item.get("ticker", "")
         ytd_close = state.ytd_closes.get(ticker)

@@ -23,6 +23,7 @@ class DashboardState:
 
     prev_closes: Dict[str, float] = field(default_factory=dict)
     ytd_closes: Dict[str, float] = field(default_factory=dict)  # Dec 31 close for YTD calc
+    ticker_details: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # static data from get_ticker_details
 
     market_is_open: bool = False   # US equities (NYSE/NASDAQ)
     indices_group_status: Dict[str, str] = field(default_factory=dict)  # group → "open"/"closed"

@@ -55,6 +55,7 @@ ALL_ECONOMY_FIELDS = {
     "avg_hourly_wage": ("Avg Hourly Wage", "avg_hourly_earnings", "dollar"),
     "cpi": ("CPI", "cpi", "num"),
     "core_cpi": ("Core CPI", "cpi_core", "num"),
+    "cpi_yoy": ("CPI YoY", "cpi_year_over_year", "pct"),
 }
 
 DEFAULT_ECONOMY_KEYS = ["unemployment", "participation", "avg_hourly_wage", "cpi", "core_cpi"]
@@ -72,6 +73,7 @@ EQUITY_COLUMNS = {
     "high":       ("High", "right", 9),
     "low":        ("Low", "right", 9),
     "vol":        ("Vol", "right", 7),
+    "mktcap":     ("Mkt Cap", "right", 9),
     "ytd%":       ("YTD%", "right", 8),
 }
 

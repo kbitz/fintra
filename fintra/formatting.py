@@ -45,6 +45,20 @@ def fmt_volume(val: Optional[float]) -> Text:
     return Text(s, style="cyan")
 
 
+def fmt_market_cap(val: Optional[float]) -> Text:
+    if val is None:
+        return Text("—", style="dim")
+    if val >= 1_000_000_000_000:
+        s = f"${val / 1_000_000_000_000:.2f}T"
+    elif val >= 1_000_000_000:
+        s = f"${val / 1_000_000_000:.1f}B"
+    elif val >= 1_000_000:
+        s = f"${val / 1_000_000:.0f}M"
+    else:
+        s = f"${val:,.0f}"
+    return Text(s, style="cyan")
+
+
 def fmt_yield_val(val: Optional[float]) -> Text:
     if val is None:
         return Text("—", style="dim")
