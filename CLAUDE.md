@@ -105,8 +105,9 @@ Run with: `python -m fintra`
 - Does **not** import from `massive` — all API calls go through `provider: MassiveProvider`
 - `_normalize_crypto_agg()` — converts crypto agg dict + previous close dict to flat dict (uses `dict.get()`)
 - `_fetch_via_aggs(provider, ...)` — fallback for Basic plan: calls `provider.fetch_aggs()` instead of snapshots
-- `fetch_market_data(provider, ...)` — calls `provider.fetch_snapshots()` (Starter+) or aggs fallback (Basic). Reads `prev_close` from returned dicts, adds `name` via `display_name()`.
-- `fetch_crypto_data(provider, ...)` — calls `provider.fetch_snapshots()` (Starter) or `provider.fetch_aggs()` (Basic). Lock prevents overlapping fetches. Atomic swap on full success, merge on partial. Stores `crypto_data_date` from agg timestamp for basic plan.
+- `_market_lock` — `threading.Lock()`, non-blocking acquire prevents overlapping threaded fetches
+- `fetch_market_data(provider, ...)` — calls `provider.fetch_snapshots()` (Starter+) or aggs fallback (Basic). Reads `prev_close` from returned dicts, adds `name` via `display_name()`. Guarded by `_market_lock`; skips if another fetch is already running.
+- `fetch_crypto_data(provider, ...)` — calls `provider.fetch_snapshots()` (Starter) or `provider.fetch_aggs()` (Basic). Lock prevents overlapping fetches. Atomic swap on full success, merge on partial. Stores `crypto_data_date` from agg timestamp (UTC) for basic plan.
 - `fetch_ytd_closes(provider, ...)` — calls `provider.fetch_aggs()`, reads `agg["close"]`
 - `fetch_ticker_details(provider, ...)` — calls `provider.fetch_ticker_details()`
 - `_fetch_with_timeout()` — wraps callable in thread with timeout to prevent hanging on 429 retries
@@ -117,9 +118,12 @@ Run with: `python -m fintra`
 
 ### `websocket.py`
 - Does **not** import from `massive` — WS feeds created via `provider.create_ws_feed()`
+- `_connected_feeds` / `_connected_lock` — set + lock tracking which feeds are currently connected; `_set_connected()` updates the set and `state.ws_connected` atomically
+- `WsFeedHandle` — handle for a WS feed with automatic reconnection; holds a `_stopped` flag and a lock-protected `_current_feed` reference. `.close()` sets the stop flag and closes the current feed.
 - `_update_ticker()` — updates a ticker dict in state with new price, recalculates change/change_pct from `prev_closes`, updates high/low/volume with min/max logic
-- `start_ws_feeds(provider, ...)` — calls `provider.create_ws_feed()` per entitled asset class with callbacks that invoke `_update_ticker()`. Returns `WsFeed` list for lifecycle management.
-- `stop_ws_feeds()` — calls `.close()` on each `WsFeed` instance
+- `_run_feed_with_reconnect(handle, provider, ...)` — reconnection loop: creates feed via `provider.create_ws_feed()`, runs it, and on disconnect backs off exponentially (1s → 2s → 4s → ... → 60s cap) before reconnecting. Exits when `handle.stopped` or `state.quit_flag` is set. Checks stop flag in 0.5s increments during backoff for responsive shutdown.
+- `start_ws_feeds(provider, ...)` — creates a `WsFeedHandle` per entitled asset class, starts `_run_feed_with_reconnect` in a daemon thread for each. Returns list of handles.
+- `stop_ws_feeds(feeds)` — calls `.close()` on each `WsFeedHandle`, which stops the reconnection loop and closes the active feed
 
 ### `ui.py`
 - `_cell_value()` — returns formatted cell value for a column key + data item. "symbol" returns raw ticker, "name" returns `display_name()`. "open_close" toggles between open/close based on `market_is_open`.
@@ -151,8 +155,10 @@ Run with: `python -m fintra`
   - **Delayed grace period:** delayed (non-realtime) feeds continue for 15 minutes after market close (`DELAYED_GRACE = 15 * 60`). Real-time feeds stop immediately on close.
   - `_check_market_status()` — calls `provider.fetch_market_status()`, reads dict keys into state
   - `_all_realtime()` — returns True if all entitled feeds are real-time (determines if grace period needed)
-  - **Crypto polling:** Starter plan (real-time snapshots) polls 24/7. Basic plan (end-of-day aggs) only polls while US equities market is active.
+  - **Non-blocking data fetches:** all `fetch_market_data` and `fetch_crypto_data` calls run in daemon threads; `_market_lock` / `_crypto_lock` prevent overlapping fetches. A hung API request cannot freeze the render loop.
+  - **Crypto polling:** Starter plan polls at `effective_refresh` interval; Basic plan (end-of-day aggs) polls hourly (`3600s`) since data only changes once per day. Both gated by `last_crypto_fetch` timestamp.
   - `eq_active` flag — True when market open OR in delayed grace period; gates equities/indices REST polling
+  - **Rate-limit backoff** — `effective_refresh` checked every iteration; backs off to `min(interval * 4, 120s)` when `state.rate_limited` is set, resets when a fetch succeeds
   - Handles market open/close transitions (start/stop WS feeds)
   - Handles watchlist switch: stops WS, resets state, re-kicks data fetches
   - Main loop renders at 2fps from shared `DashboardState`
@@ -179,9 +185,10 @@ These are the underlying Massive SDK calls used inside `provider.py`. No other m
 - **Never blank data on failure** — state lists only overwritten when new data is fetched successfully
 - **Background-first startup** — dashboard renders immediately, all API calls happen in background threads
 - **Rate limit awareness** — crypto enforces `num_tickers * 12s` minimum interval; economy spaces calls 15s apart; REST polls back off 4x on 429
-- **WS as enhancement, REST as baseline** — WS provides per-second updates; REST polls on configured interval as safety net
+- **WS reconnection with backoff** — WS feeds automatically reconnect on disconnect with exponential backoff (1s → 60s cap). Each feed runs in a `_run_feed_with_reconnect` loop managed by a `WsFeedHandle`; calling `.close()` on the handle stops reconnection and closes the active feed. `_connected_feeds` set tracks per-feed connection state so `state.ws_connected` is accurate across multiple feeds.
+- **WS as enhancement, REST as baseline** — WS provides per-second updates; REST polls on configured interval as safety net. All REST fetches run in daemon threads with non-blocking locks so a hung API call cannot freeze the main render loop.
 - **Delayed grace period** — non-realtime (delayed) feeds continue updating for 15 minutes after market close to capture final settlement prices; real-time feeds stop immediately
-- **Plan-aware crypto polling** — Starter plan (real-time snapshots) polls 24/7; Basic plan (end-of-day aggs) stops when US equities market closes since no new data is available
+- **Plan-aware crypto polling** — Starter plan (real-time snapshots) polls at `effective_refresh` interval; Basic plan (end-of-day aggs) polls hourly and only while US equities market is active since data only changes once per day
 - **Per-section status** — each market panel shows its own freshness and "market closed" status in the subtitle
 - **No python-dotenv dependency** — `.env` loaded with simple manual parser in `main()`
 - **Terminal safety** — original termios saved at startup, restored in `finally` block to prevent broken terminal on Ctrl+C
