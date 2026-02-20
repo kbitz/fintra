@@ -9,7 +9,7 @@ from massive import RESTClient
 from rich.console import Console
 from rich.live import Live
 
-from fintra.config import parse_config, parse_watchlist
+from fintra.config import parse_config, parse_watchlist, list_watchlists
 from fintra.constants import PROJECT_ROOT
 from fintra.data import fetch_market_data, fetch_crypto_data, fetch_economy_data, fetch_ytd_closes
 from fintra.plans import load_plans
@@ -38,11 +38,18 @@ def main():
 
     # Parse config and watchlist
     config = parse_config()
-    watchlist = parse_watchlist()
+
+    # Discover available watchlist files and load the first one
+    watchlist_files = list_watchlists()
+    if not watchlist_files:
+        print("[error] No valid watchlist files found in watchlists/")
+        sys.exit(1)
+    watchlist_idx = 0
+    watchlist = parse_watchlist(watchlist_files[watchlist_idx])
 
     total_tickers = len(watchlist["equities"]) + len(watchlist["crypto"]) + len(watchlist["indices"])
     if total_tickers == 0:
-        print("[error] watchlist.txt has no tickers.")
+        print("[error] Watchlist has no tickers.")
         sys.exit(1)
 
     print(f"[fintra] Refresh: {config.refresh_interval}s market, {config.economy_interval}s economy")
@@ -54,6 +61,7 @@ def main():
     client = RESTClient(api_key=api_key)
     plans = load_plans(client, api_key)
     state = DashboardState()
+    state.active_watchlist_name = os.path.basename(watchlist_files[watchlist_idx])
 
     # Save original terminal settings before key listener changes them
     _original_termios = None
@@ -137,6 +145,62 @@ def main():
         with Live(build_layout(state, watchlist, config, plans), console=console, screen=True, refresh_per_second=2) as live:
             while not state.quit_flag:
                 now = time.time()
+
+                # Handle watchlist switch
+                if state.switch_watchlist:
+                    state.switch_watchlist = False
+                    watchlist_files = list_watchlists()
+                    if len(watchlist_files) > 1:
+                        watchlist_idx = (watchlist_idx + 1) % len(watchlist_files)
+                    elif len(watchlist_files) == 1:
+                        watchlist_idx = 0
+                    else:
+                        state.watchlist_error = "No valid watchlist files"
+                    if watchlist_files:
+                        new_path = watchlist_files[watchlist_idx]
+                        try:
+                            new_wl = parse_watchlist(new_path)
+                            new_total = len(new_wl["equities"]) + len(new_wl["crypto"]) + len(new_wl["indices"])
+                            if new_total == 0:
+                                state.watchlist_error = f"{os.path.basename(new_path)}: no tickers"
+                            else:
+                                # Stop existing WS feeds
+                                stop_ws_feeds(ws_clients)
+                                ws_clients = []
+                                was_open = False
+                                market_closed_at = None
+                                # Reset state data
+                                state.equities = []
+                                state.crypto = []
+                                state.indices = []
+                                state.treasury = {}
+                                state.labor = {}
+                                state.inflation = {}
+                                state.prev_closes = {}
+                                state.ytd_closes = {}
+                                state.market_updated = None
+                                state.crypto_updated = None
+                                state.crypto_data_date = None
+                                state.economy_updated = None
+                                state.market_stale = False
+                                state.economy_stale = False
+                                state.market_error = ""
+                                state.economy_error = ""
+                                state.ws_connected = False
+                                state.watchlist_error = ""
+                                # Swap watchlist
+                                watchlist = new_wl
+                                state.active_watchlist_name = os.path.basename(new_path)
+                                # Re-kick data fetches
+                                threading.Thread(target=_init_market, daemon=True).start()
+                                threading.Thread(target=fetch_economy_data, args=(client, state), daemon=True).start()
+                                if needs_ytd:
+                                    threading.Thread(target=_ytd_after_economy, daemon=True).start()
+                                last_market_fetch = now
+                                last_economy_fetch = now
+                                last_status_check = now
+                        except Exception as e:
+                            state.watchlist_error = f"{os.path.basename(new_path)}: {e}"
 
                 # Check market status every 60s
                 if now - last_status_check >= 60:

@@ -1,6 +1,7 @@
 venv/
 .env
 .plans.json
+.econ_cache.json
 __pycache__/
 *.pyc
 .claude/

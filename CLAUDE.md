@@ -11,12 +11,14 @@ Fintra/                        # project root
 ├── README.md
 ├── CLAUDE.md
 ├── config.ini                 # refresh intervals, column config
-├── watchlist.txt              # ticker lists by section (equities, crypto, indices, treasury, economy)
+├── watchlists/                # ticker watchlist files (.txt), press `l` to cycle
+│   └── watchlist.txt          # default watchlist
 ├── requirements.txt           # massive, rich
 ├── setup.sh                   # creates venv, installs deps
 ├── .env                       # MASSIVE_API_KEY=... (gitignored)
 ├── .env.example               # template for users (no real key)
 ├── .plans.json                # cached API plan detection (gitignored)
+├── .econ_cache.json           # cached economy data, invalidated after market close (gitignored)
 ├── .gitignore
 └── fintra/                    # Python package
     ├── __init__.py            # version, docstring
@@ -38,7 +40,7 @@ Run with: `python -m fintra`
 
 ### `constants.py`
 - `PROJECT_ROOT` — resolved via `os.path.dirname(os.path.dirname(__file__))`, all config/data files are relative to this
-- `CONFIG_PATH`, `WATCHLIST_PATH`, `PLANS_PATH`
+- `CONFIG_PATH`, `WATCHLISTS_DIR`, `DEFAULT_WATCHLIST`, `PLANS_PATH`, `ECON_CACHE_PATH`
 - `DISPLAY_NAMES` — ticker → friendly name mapping
 - `INDEX_GROUPS` — ticker → `indicesGroups` API key mapping (e.g. `"I:SPX"` → `"s_and_p"`)
 - `ALL_YIELD_FIELDS`, `DEFAULT_YIELD_KEYS` — treasury yield maturity mappings
@@ -50,7 +52,9 @@ Run with: `python -m fintra`
 - `parse_interval()` — converts `10s`/`1m`/`1h`/`1d` to seconds
 - `Config` dataclass — refresh/economy intervals + column lists per section
 - `parse_config()` — reads config.ini into `Config`, validates column names against available columns
-- `parse_watchlist()` — reads watchlist.txt into `{equities: [], crypto: [], indices: [], treasury: [], economy: []}`
+- `parse_watchlist(path)` — reads a watchlist file into `{equities: [], crypto: [], indices: [], treasury: [], economy: []}`
+- `validate_watchlist(path)` — quick check for valid `[section]` headers
+- `list_watchlists()` — scans `WATCHLISTS_DIR` for valid `.txt` watchlist files, returns sorted absolute paths
 
 ### `state.py`
 - `DashboardState` dataclass — shared mutable state:
@@ -63,6 +67,8 @@ Run with: `python -m fintra`
   - `market_is_open` — overall US equity market status (NYSE/NASDAQ)
   - `indices_group_status` — per-group open/closed from `get_market_status().indicesGroups`
   - `ws_connected`, `rate_limited`, `quit_flag` — flags
+  - `switch_watchlist` — flag set by `l` key to trigger watchlist cycle
+  - `watchlist_error`, `active_watchlist_name` — watchlist status for header display
   - `market_stale`, `economy_stale`, `market_error`, `economy_error` — status tracking
 
 ### `plans.py`
@@ -88,7 +94,9 @@ Run with: `python -m fintra`
 - `fetch_ytd_closes()` — fetches Dec 31 closing prices for YTD % column
 - `_fetch_with_timeout()` — wraps callable in thread with timeout to prevent hanging on 429 retries
 - `_fetch_economy_endpoint()` — retry wrapper for economy endpoints
-- `fetch_economy_data()` — 3 sequential REST calls (treasury, labor, inflation) spaced 15s apart. Uses `next(iter(...))` NOT `list()`.
+- `_last_market_close()` — returns Unix timestamp of the most recent NYSE close (4 PM ET), skipping weekends
+- `_load_econ_cache()` / `_save_econ_cache()` — disk cache for economy data in `.econ_cache.json`, invalidated after market close
+- `fetch_economy_data()` — checks cache first; if stale, makes 3 sequential REST calls (treasury, labor, inflation) spaced 15s apart and saves cache on success. Uses `next(iter(...))` NOT `list()`.
 
 ### `websocket.py`
 - `_update_ticker()` — updates a ticker dict in state with new price, recalculates change/change_pct from `prev_closes`, updates high/low/volume with min/max logic
@@ -105,9 +113,9 @@ Run with: `python -m fintra`
 - `build_crypto_table()` — starter: "real-time, polled Xs ago"; basic: shows `crypto_data_date`
 - `build_treasury_panel()` — subtitle shows data date in `YYYY-MM-DD` format
 - `build_economy_panel()` — subtitle shows date in `Mon YYYY` format
-- `make_header()` — shows errors, rate limit warnings, time, quit hint
+- `make_header()` — shows active watchlist name, errors, rate limit warnings, time, `[l] List` + `[q] Quit` hints
 - `build_layout()` — Rich Layout: header → indices → equities → crypto → bottom split (treasury | economy)
-- `key_listener()` — background thread, `tty.setcbreak()` for 'q' detection
+- `key_listener()` — background thread, `tty.setcbreak()` for 'q' (quit) and 'l' (cycle watchlist) detection
 
 **Visual styling:** All panel borders `grey70`, titles `[bold grey70]`, subtitles `[grey46]`. Neutral values (prices, volume, yields, economy) in cyan; changes green/red.
 
@@ -126,6 +134,7 @@ Run with: `python -m fintra`
   - **Crypto polling:** Starter plan (real-time snapshots) polls 24/7. Basic plan (end-of-day aggs) only polls while US equities market is active.
   - `eq_active` flag — True when market open OR in delayed grace period; gates equities/indices REST polling
   - Handles market open/close transitions (start/stop WS feeds)
+  - Handles watchlist switch: stops WS, resets state, re-kicks data fetches
   - Main loop renders at 2fps from shared `DashboardState`
 
 ## API Compatibility
@@ -163,5 +172,4 @@ Run with: `python -m fintra`
 
 ## TODO
 
-- **Watchlist switcher** — press `l` to show a list of available watchlist files, select one to swap the active view; support multiple `.txt` watchlists in the project directory
 - **CLI install** — add `pyproject.toml` with a `[project.scripts]` entry so `pip install .` creates a `fintra` command runnable from anywhere

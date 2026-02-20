@@ -4,8 +4,10 @@ import os
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CONFIG_PATH = os.path.join(PROJECT_ROOT, "config.ini")
-WATCHLIST_PATH = os.path.join(PROJECT_ROOT, "watchlist.txt")
+WATCHLISTS_DIR = os.path.join(PROJECT_ROOT, "watchlists")
+DEFAULT_WATCHLIST = "watchlist.txt"
 PLANS_PATH = os.path.join(PROJECT_ROOT, ".plans.json")
+ECON_CACHE_PATH = os.path.join(PROJECT_ROOT, ".econ_cache.json")
 
 DEFAULT_REFRESH = 10
 DEFAULT_ECONOMY = 86400  # 1 day — economy data changes at most daily

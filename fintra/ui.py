@@ -218,6 +218,12 @@ def make_header(state: DashboardState) -> Panel:
     now = datetime.now().strftime("%H:%M:%S")
 
     left = Text()
+    if state.active_watchlist_name:
+        left.append(state.active_watchlist_name, style="bold cyan")
+        left.append("  ")
+    if state.watchlist_error:
+        left.append(f"\u26a0 {state.watchlist_error}", style="bold yellow")
+        left.append("  ")
     if state.market_error:
         left.append(f"\u26a0 {state.market_error}", style="bold yellow")
     if state.rate_limited:
@@ -226,7 +232,7 @@ def make_header(state: DashboardState) -> Panel:
         else:
             left.append("    [rate limited]", style="bold red")
 
-    right = Text(f"{now}  [q] Quit", style="dim")
+    right = Text(f"{now}  [l] List  [q] Quit", style="dim")
 
     header_table = Table(expand=True, box=None, show_header=False, padding=0)
     header_table.add_column("left")
@@ -290,6 +296,8 @@ def key_listener(state: DashboardState):
                 if ch in ("q", "Q"):
                     state.quit_flag = True
                     break
+                elif ch in ("l", "L"):
+                    state.switch_watchlist = True
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
     except Exception:

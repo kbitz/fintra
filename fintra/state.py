@@ -29,3 +29,7 @@ class DashboardState:
     rate_limited: bool = False
     ws_connected: bool = False
     quit_flag: bool = False
+
+    switch_watchlist: bool = False
+    watchlist_error: str = ""
+    active_watchlist_name: str = ""

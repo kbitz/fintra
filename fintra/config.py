@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from fintra.constants import (
-    CONFIG_PATH, WATCHLIST_PATH,
+    CONFIG_PATH, WATCHLISTS_DIR, DEFAULT_WATCHLIST,
     DEFAULT_REFRESH, DEFAULT_ECONOMY,
     EQUITY_COLUMNS, INDEX_COLUMNS, CRYPTO_COLUMNS,
     DEFAULT_EQUITY_COLS, DEFAULT_INDEX_COLS, DEFAULT_CRYPTO_COLS,
@@ -64,15 +64,20 @@ def parse_config() -> Config:
     return cfg_obj
 
 
-def parse_watchlist() -> Dict[str, List[str]]:
-    """Parse watchlist.txt into {equities: [], crypto: [], indices: [], treasury: [], economy: []}."""
+VALID_SECTIONS = {"equities", "crypto", "indices", "treasury", "economy"}
+
+
+def parse_watchlist(path: str = "") -> Dict[str, List[str]]:
+    """Parse a watchlist file into {equities: [], crypto: [], indices: [], treasury: [], economy: []}."""
+    if not path:
+        path = os.path.join(WATCHLISTS_DIR, DEFAULT_WATCHLIST)
     result: Dict[str, List[str]] = {"equities": [], "crypto": [], "indices": [], "treasury": [], "economy": []}
-    if not os.path.exists(WATCHLIST_PATH):
-        print(f"[error] {WATCHLIST_PATH} not found")
+    if not os.path.exists(path):
+        print(f"[error] {path} not found")
         sys.exit(1)
 
     current_section = None
-    with open(WATCHLIST_PATH, "r") as f:
+    with open(path, "r") as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith("#"):
@@ -85,3 +90,31 @@ def parse_watchlist() -> Dict[str, List[str]]:
             if current_section:
                 result[current_section].append(line)
     return result
+
+
+def validate_watchlist(path: str) -> bool:
+    """Quick check that a file has at least one recognized [section] header."""
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("[") and line.endswith("]"):
+                    if line[1:-1].lower() in VALID_SECTIONS:
+                        return True
+    except OSError:
+        return False
+    return False
+
+
+def list_watchlists() -> List[str]:
+    """Scan WATCHLISTS_DIR for valid .txt watchlist files. Returns sorted absolute paths."""
+    if not os.path.isdir(WATCHLISTS_DIR):
+        return []
+    paths = []
+    for name in sorted(os.listdir(WATCHLISTS_DIR)):
+        if not name.endswith(".txt"):
+            continue
+        full = os.path.join(WATCHLISTS_DIR, name)
+        if os.path.isfile(full) and validate_watchlist(full):
+            paths.append(full)
+    return paths

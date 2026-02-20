@@ -1,14 +1,66 @@
+import json
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, time as dt_time, timedelta
 from typing import Any, Dict, List
+from zoneinfo import ZoneInfo
 
 from massive import RESTClient
 
-from fintra.constants import ALL_YIELD_FIELDS
+from fintra.constants import ALL_YIELD_FIELDS, ECON_CACHE_PATH
 from fintra.formatting import display_name
 from fintra.plans import PlanInfo
 from fintra.state import DashboardState
+
+
+def _last_market_close() -> float:
+    """Return the Unix timestamp of the most recent NYSE close (4 PM ET)."""
+    et = ZoneInfo("America/New_York")
+    now_et = datetime.now(et)
+    close = dt_time(16, 0)
+
+    if now_et.weekday() < 5 and now_et >= datetime.combine(now_et.date(), close, tzinfo=et):
+        return datetime.combine(now_et.date(), close, tzinfo=et).timestamp()
+
+    # Walk back to the previous weekday
+    candidate = now_et.date()
+    if now_et.weekday() < 5:
+        candidate -= timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate -= timedelta(days=1)
+    return datetime.combine(candidate, close, tzinfo=et).timestamp()
+
+
+def _load_econ_cache(state: DashboardState) -> bool:
+    """Load economy data from cache if it was fetched after the last market close."""
+    try:
+        with open(ECON_CACHE_PATH, "r") as f:
+            cache = json.load(f)
+        if cache.get("fetched_at", 0) > _last_market_close():
+            state.treasury = cache.get("treasury", {})
+            state.labor = cache.get("labor", {})
+            state.inflation = cache.get("inflation", {})
+            state.economy_updated = cache["fetched_at"]
+            state.economy_error = ""
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _save_econ_cache(state: DashboardState):
+    """Persist economy data to disk for fast startup."""
+    try:
+        cache = {
+            "fetched_at": time.time(),
+            "treasury": state.treasury,
+            "labor": state.labor,
+            "inflation": state.inflation,
+        }
+        with open(ECON_CACHE_PATH, "w") as f:
+            json.dump(cache, f, default=lambda o: o.isoformat() if hasattr(o, "isoformat") else str(o))
+    except Exception:
+        pass
 
 
 def normalize_snapshot(snap: Any, ticker: str) -> Dict[str, Any]:
@@ -313,8 +365,13 @@ def _fetch_economy_endpoint(fn, timeout=20, retries=2):
 def fetch_economy_data(client: RESTClient, state: DashboardState):
     """Fetch treasury yields, labor market, and inflation data.
 
-    Spaces calls 15s apart to stay within 5 calls/min rate limits.
+    Checks disk cache first — skips API calls if data was fetched after the
+    last NYSE close (4 PM ET).  Spaces API calls 15s apart to stay within
+    5 calls/min rate limits.
     """
+    if _load_econ_cache(state):
+        return
+
     had_error = False
 
     # Treasury yields — use next(iter()) to avoid pagination burning rate limit
@@ -378,3 +435,4 @@ def fetch_economy_data(client: RESTClient, state: DashboardState):
         state.economy_stale = False
         state.economy_updated = time.time()
         state.economy_error = ""
+        _save_econ_cache(state)
