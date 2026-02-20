@@ -91,7 +91,7 @@ Run with: `python -m fintra`
   - `probe_snapshots(ticker)` → bool (used by plans.py for plan detection)
   - `create_ws_feed(market, feed_type, tickers, on_update)` → `WsFeed` with `.run()` / `.close()`
 - `WsFeed` class — thin wrapper around `WebSocketClient`; `.run()` dispatches parsed messages via `on_update(ticker, price, extras_dict)` callback
-- `_normalize_snapshot()` — static method; converts SDK snapshot objects to flat dicts (moved from data.py)
+- `_normalize_snapshot()` — static method; converts SDK snapshot objects to flat dicts. Extracts extended hours fields: `pre_market_change`, `pre_market_change_pct`, `after_hours_change`, `after_hours_change_pct`, `regular_change`, `regular_change_pct` from the session's early/late/regular trading attributes
 
 ### `formatting.py`
 - `fmt_price(val, large)` — returns cyan `Text`; uses comma separator when `large=True`
@@ -99,6 +99,9 @@ Run with: `python -m fintra`
 - `fmt_pct(val)` — returns green/red `Text` with % suffix
 - `fmt_volume(val)` — returns cyan `Text` with B/M/K suffixes
 - `fmt_yield_val(val)` — returns cyan `Text` with % suffix
+- `fmt_ext_chg(val, large)` — returns dim parenthesized change text for extended hours, e.g. ` (+1.50)`; returns None if val is None
+- `fmt_ext_pct(val)` — returns dim parenthesized change percent text for extended hours, e.g. ` (+0.85%)`; returns None if val is None
+- `fmt_ext_price(val, large)` — returns dim parenthesized price text for extended hours; returns None if val is None
 - `display_name(ticker)` — ticker → friendly name via `DISPLAY_NAMES`
 
 ### `data.py`
@@ -120,13 +123,16 @@ Run with: `python -m fintra`
 - Does **not** import from `massive` — WS feeds created via `provider.create_ws_feed()`
 - `_connected_feeds` / `_connected_lock` — set + lock tracking which feeds are currently connected; `_set_connected()` updates the set and `state.ws_connected` atomically
 - `WsFeedHandle` — handle for a WS feed with automatic reconnection; holds a `_stopped` flag and a lock-protected `_current_feed` reference. `.close()` sets the stop flag and closes the current feed.
-- `_update_ticker()` — updates a ticker dict in state with new price, recalculates change/change_pct from `prev_closes`, updates high/low/volume with min/max logic
+- `_update_ticker()` — updates a ticker dict in state with new price, recalculates change/change_pct from `prev_closes`, updates high/low/volume with min/max logic. Sets `_flash_until` and `_flash_up` when change value differs from previous
 - `_run_feed_with_reconnect(handle, provider, ...)` — reconnection loop: creates feed via `provider.create_ws_feed()`, runs it, and on disconnect backs off exponentially (1s → 2s → 4s → ... → 60s cap) before reconnecting. Exits when `handle.stopped` or `state.quit_flag` is set. Checks stop flag in 0.5s increments during backoff for responsive shutdown.
 - `start_ws_feeds(provider, ...)` — creates a `WsFeedHandle` per entitled asset class, starts `_run_feed_with_reconnect` in a daemon thread for each. Returns list of handles.
 - `stop_ws_feeds(feeds)` — calls `.close()` on each `WsFeedHandle`, which stops the reconnection loop and closes the active feed
 
 ### `ui.py`
-- `_cell_value()` — returns formatted cell value for a column key + data item. "symbol" returns raw ticker, "name" returns `display_name()`. "open_close" toggles between open/close based on `market_is_open`.
+- `_get_ext_hours(item)` — returns `(ext_change, ext_change_pct, label)` where label is `"AH"` or `"PM"`, or all Nones if no extended hours data
+- `_apply_flash(result, item)` — if `_flash_until` is in the future, overrides Text style with bold white on dark_green/dark_red background
+- `_regular_close(item)` — computes regular session close from `prev_close + regular_change`; returns None if fields missing
+- `_cell_value()` — returns formatted cell value for a column key + data item. "symbol" returns raw ticker, "name" returns `display_name()`. "open_close" toggles between open/close based on `market_is_open`. When market is closed and extended hours data is present: "last" shows regular close with extended price in dim parens, "chg"/"chg%" show regular change with extended change in dim parens. Flash background applied to "chg"/"chg%" when `_flash_until` is active.
 - `_build_market_table()` — generic Rich Table builder from column config
 - `_data_freshness(plan_tier, market)` — returns freshness label: "real-time" (advanced or crypto starter), "15m delayed" (starter), "end of day" (basic)
 - `_format_date(date_val, fmt)` — date formatter with configurable strftime format
@@ -193,6 +199,8 @@ These are the underlying Massive SDK calls used inside `provider.py`. No other m
 - **No python-dotenv dependency** — `.env` loaded with simple manual parser in `main()`
 - **Terminal safety** — original termios saved at startup, restored in `finally` block to prevent broken terminal on Ctrl+C
 - **Path resolution** — all config/data files resolve relative to `PROJECT_ROOT` (parent of `fintra/` package dir), not the package itself
+- **Extended hours data** — when market is closed, equities show regular session values as main display with pre-market or after-hours changes in dim parentheses. After-hours takes priority over pre-market. Regular session close computed from `prev_close + regular_change`. Graceful fallback: if extended hours fields are None, display is unchanged
+- **Flash on change** — `_flash_until` timestamp + `_flash_up` direction flag set on ticker dicts by both WS updates and REST fetches. UI checks flash state on "chg"/"chg%" columns and overrides style with `bold white on dark_green/dark_red` for ~1 second (2 render cycles at 2fps). Threshold of 0.001 prevents floating-point noise from triggering flashes on REST updates
 - **Unified visual styling** — light grey (`grey70`) borders and titles, darker grey (`grey46`) subtitles, cyan for neutral values, green/red for changes
 
 ## Known Bugs
@@ -202,4 +210,4 @@ These are the underlying Massive SDK calls used inside `provider.py`. No other m
 
 ## TODO
 
-- **CLI install** — add `pyproject.toml` with a `[project.scripts]` entry so `pip install .` creates a `fintra` command runnable from anywhere
+- **Equity sub-groups** — allow named groups within `[equities]` in watchlist (e.g. "Owned", "Wishlist") separated by a visual break and small title in the table, no separate panel

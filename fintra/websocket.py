@@ -51,11 +51,15 @@ def _update_ticker(items: List[Dict[str, Any]], ticker: str, last: float,
     """Update a ticker dict in a list with new price data."""
     for item in items:
         if item["ticker"] == ticker:
+            old_change = item.get("change")
             item["last"] = last
             prev = prev_closes.get(ticker)
             if prev:
                 item["change"] = last - prev
                 item["change_pct"] = (item["change"] / prev) * 100
+            if old_change is not None and item.get("change") != old_change:
+                item["_flash_until"] = time.time() + 1.0
+                item["_flash_up"] = (item["change"] - old_change) > 0
             for k, v in extra.items():
                 if v is not None:
                     if k in ("high",) and item.get(k) is not None:

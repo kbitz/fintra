@@ -130,6 +130,10 @@ def fetch_market_data(provider, watchlist: Dict[str, List[str]],
         else:
             agg_ix_tickers = watchlist["indices"]
 
+        # Snapshot old change values for flash-on-change detection
+        old_eq_changes = {item["ticker"]: item.get("change") for item in state.equities}
+        old_ix_changes = {item["ticker"]: item.get("change") for item in state.indices}
+
         # Fetch via snapshots where available
         if snap_tickers:
             snap_list = provider.fetch_snapshots(snap_tickers)
@@ -141,6 +145,11 @@ def fetch_market_data(provider, watchlist: Dict[str, List[str]],
                     if t in snap_map:
                         d = snap_map[t]
                         d["name"] = display_name(t)
+                        old_chg = old_eq_changes.get(t)
+                        new_chg = d.get("change")
+                        if old_chg is not None and new_chg is not None and abs(new_chg - old_chg) > 0.001:
+                            d["_flash_until"] = time.time() + 1.0
+                            d["_flash_up"] = (new_chg - old_chg) > 0
                         new_eq.append(d)
                 if new_eq:
                     state.equities = new_eq
@@ -150,6 +159,11 @@ def fetch_market_data(provider, watchlist: Dict[str, List[str]],
                     if t in snap_map:
                         d = snap_map[t]
                         d["name"] = display_name(t)
+                        old_chg = old_ix_changes.get(t)
+                        new_chg = d.get("change")
+                        if old_chg is not None and new_chg is not None and abs(new_chg - old_chg) > 0.001:
+                            d["_flash_until"] = time.time() + 1.0
+                            d["_flash_up"] = (new_chg - old_chg) > 0
                         new_ix.append(d)
                 if new_ix:
                     state.indices = new_ix
@@ -205,6 +219,7 @@ def fetch_crypto_data(provider, watchlist: Dict[str, List[str]],
         return
 
     try:
+        old_crypto_changes = {item["ticker"]: item.get("change") for item in state.crypto}
         crypto_data = []
 
         if plans.currencies_has_snapshots:
@@ -214,6 +229,11 @@ def fetch_crypto_data(provider, watchlist: Dict[str, List[str]],
                 for d in snap_list:
                     t = d["ticker"]
                     d["name"] = display_name(t)
+                    old_chg = old_crypto_changes.get(t)
+                    new_chg = d.get("change")
+                    if old_chg is not None and new_chg is not None and abs(new_chg - old_chg) > 0.001:
+                        d["_flash_until"] = time.time() + 1.0
+                        d["_flash_up"] = (new_chg - old_chg) > 0
                     crypto_data.append(d)
                     prev = d.get("prev_close")
                     if prev is not None:

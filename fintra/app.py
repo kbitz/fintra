@@ -3,7 +3,9 @@ import sys
 import threading
 import time
 import warnings
+from datetime import datetime, time as dt_time
 from typing import Any, List
+from zoneinfo import ZoneInfo
 
 from rich.console import Console
 from rich.live import Live
@@ -93,6 +95,20 @@ def main():
                 state.indices_group_status = groups
         except Exception:
             pass
+
+    _ET = ZoneInfo("America/New_York")
+    _PRE_MARKET_OPEN = dt_time(4, 0)
+    _MARKET_OPEN = dt_time(9, 30)
+    _MARKET_CLOSE = dt_time(16, 0)
+    _AFTER_HOURS_CLOSE = dt_time(20, 0)
+
+    def _in_extended_hours() -> bool:
+        """True if current ET time is in pre-market or after-hours on a weekday."""
+        now_et = datetime.now(_ET)
+        if now_et.weekday() >= 5:  # weekend
+            return False
+        t = now_et.time()
+        return (_PRE_MARKET_OPEN <= t < _MARKET_OPEN) or (_MARKET_CLOSE <= t < _AFTER_HOURS_CLOSE)
 
     def _all_realtime():
         """True if all entitled feeds are real-time (no delayed grace needed)."""
@@ -241,8 +257,10 @@ def main():
                 else:
                     effective_refresh = config.refresh_interval
 
-                # Equities/indices: active when market open OR in delayed grace period
-                eq_active = state.market_is_open or market_closed_at is not None
+                # Equities/indices: active when market open, in delayed grace, or extended hours
+                ext_hours = _in_extended_hours()
+                state.extended_hours = ext_hours
+                eq_active = state.market_is_open or market_closed_at is not None or ext_hours
                 if eq_active:
                     if now - last_market_fetch >= effective_refresh:
                         threading.Thread(target=fetch_market_data, args=(provider, watchlist, state, plans), daemon=True).start()

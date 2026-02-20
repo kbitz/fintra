@@ -195,6 +195,12 @@ class MassiveProvider:
             d["change"] = getattr(session, "change", None)
             d["change_pct"] = getattr(session, "change_percent", None)
             d["prev_close"] = getattr(session, "previous_close", None)
+            d["pre_market_change"] = getattr(session, "early_trading_change", None)
+            d["pre_market_change_pct"] = getattr(session, "early_trading_change_percent", None)
+            d["after_hours_change"] = getattr(session, "late_trading_change", None)
+            d["after_hours_change_pct"] = getattr(session, "late_trading_change_percent", None)
+            d["regular_change"] = getattr(session, "regular_trading_change", None)
+            d["regular_change_pct"] = getattr(session, "regular_trading_change_percent", None)
             # Derive prev_close from close - change if not directly available
             if d["prev_close"] is None and d["last"] is not None and d["change"] is not None:
                 d["prev_close"] = d["last"] - d["change"]

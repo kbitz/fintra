@@ -14,9 +14,42 @@ from fintra.constants import (
     ALL_YIELD_FIELDS, DEFAULT_YIELD_KEYS,
     ALL_ECONOMY_FIELDS, DEFAULT_ECONOMY_KEYS,
 )
-from fintra.formatting import fmt_price, fmt_change, fmt_pct, fmt_volume, fmt_market_cap, fmt_yield_val, display_name
+from fintra.formatting import (
+    fmt_price, fmt_change, fmt_pct, fmt_volume, fmt_market_cap, fmt_yield_val,
+    fmt_ext_chg, fmt_ext_pct, fmt_ext_price, display_name,
+)
 from fintra.plans import PlanInfo
 from fintra.state import DashboardState
+
+
+def _get_ext_hours(item: Dict[str, Any]) -> tuple:
+    """Return (ext_change, ext_change_pct, label) for extended hours, or Nones."""
+    ah_chg = item.get("after_hours_change")
+    ah_pct = item.get("after_hours_change_pct")
+    if ah_chg is not None or ah_pct is not None:
+        return (ah_chg, ah_pct, "AH")
+    pm_chg = item.get("pre_market_change")
+    pm_pct = item.get("pre_market_change_pct")
+    if pm_chg is not None or pm_pct is not None:
+        return (pm_chg, pm_pct, "PM")
+    return (None, None, None)
+
+
+def _apply_flash(result: Text, item: Dict[str, Any]) -> Text:
+    """If flash is active, override style with flash background."""
+    if time.time() < item.get("_flash_until", 0):
+        bg = "on dark_green" if item.get("_flash_up") else "on dark_red"
+        return Text(result.plain, style=f"bold white {bg}")
+    return result
+
+
+def _regular_close(item: Dict[str, Any]):
+    """Compute regular session close: prev_close + regular_change, or fall back to last."""
+    reg_chg = item.get("regular_change")
+    prev = item.get("prev_close")
+    if reg_chg is not None and prev is not None:
+        return prev + reg_chg
+    return None
 
 
 def _cell_value(col_key: str, item: Dict[str, Any], state: DashboardState, large: bool = False):
@@ -26,16 +59,50 @@ def _cell_value(col_key: str, item: Dict[str, Any], state: DashboardState, large
     elif col_key == "name":
         return display_name(item["ticker"])
     elif col_key == "last":
-        return fmt_price(item.get("last"), large=large)
+        if not state.market_is_open:
+            ext_chg, ext_pct, label = _get_ext_hours(item)
+            if label is not None and ext_chg is not None:
+                reg_close = _regular_close(item) or item.get("last")
+                ext_price = reg_close + ext_chg if reg_close is not None else None
+                if state.extended_hours:
+                    style = "green" if ext_chg >= 0 else "red"
+                else:
+                    style = "cyan"
+                return fmt_price(ext_price, large=large, style=style)
+            return fmt_price(item.get("last"), large=large)
+        chg = item.get("change")
+        style = "green" if chg is not None and chg >= 0 else "red" if chg is not None else "cyan"
+        return fmt_price(item.get("last"), large=large, style=style)
     elif col_key == "chg":
-        return fmt_change(item.get("change"), large=large)
+        if not state.market_is_open:
+            ext_chg, ext_pct, label = _get_ext_hours(item)
+            if label is not None:
+                main_chg = item.get("regular_change") or item.get("change")
+                result = fmt_change(main_chg, large=large)
+                ext_ann = fmt_ext_chg(ext_chg, large=large)
+                if ext_ann:
+                    result.append_text(ext_ann)
+                return _apply_flash(result, item)
+        result = fmt_change(item.get("change"), large=large)
+        return _apply_flash(result, item)
     elif col_key == "chg%":
-        return fmt_pct(item.get("change_pct"))
+        if not state.market_is_open:
+            ext_chg, ext_pct, label = _get_ext_hours(item)
+            if label is not None:
+                main_pct = item.get("regular_change_pct") or item.get("change_pct")
+                result = fmt_pct(main_pct)
+                ext_ann = fmt_ext_pct(ext_pct)
+                if ext_ann:
+                    result.append_text(ext_ann)
+                return _apply_flash(result, item)
+        result = fmt_pct(item.get("change_pct"))
+        return _apply_flash(result, item)
     elif col_key == "open_close":
         if state.market_is_open:
             return fmt_price(item.get("open"), large=large)
         else:
-            return fmt_price(item.get("last"), large=large)
+            reg_close = _regular_close(item)
+            return fmt_price(reg_close or item.get("last"), large=large)
     elif col_key == "open":
         return fmt_price(item.get("open"), large=large)
     elif col_key == "high":
@@ -100,19 +167,23 @@ def _data_freshness(plan_tier: str, market: str = "stocks") -> str:
 
 
 def _format_date(date_val, fmt: str = "%b %d, %Y") -> str:
-    """Format a date value using the given strftime format."""
+    """Format a date value using the given strftime format.
+
+    Converts to a naive date first to avoid timezone shifts.
+    """
     if not date_val:
         return ""
-    if hasattr(date_val, "strftime"):
-        return date_val.strftime(fmt)
+    # Extract the bare YYYY-MM-DD string to avoid timezone adjustments
+    date_str = str(date_val)[:10]
     try:
-        dt = datetime.strptime(str(date_val), "%Y-%m-%d")
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
         return dt.strftime(fmt)
     except (ValueError, TypeError):
         return str(date_val)
 
 
-def _market_subtitle(freshness: str, state: DashboardState, streaming: bool = False) -> str:
+def _market_subtitle(freshness: str, state: DashboardState, streaming: bool = False,
+                     show_extended: bool = True) -> str:
     """Build the subtitle string for a market section panel."""
     parts = [freshness]
     if streaming:
@@ -120,7 +191,10 @@ def _market_subtitle(freshness: str, state: DashboardState, streaming: bool = Fa
     if state.market_stale:
         parts.append("stale")
     if not state.market_is_open:
-        parts.append("market closed")
+        if show_extended and state.extended_hours:
+            parts.append("extended hours")
+        else:
+            parts.append("market closed")
     return ", ".join(parts)
 
 
@@ -155,7 +229,7 @@ def build_crypto_table(state: DashboardState, config: Config, plans: PlanInfo) -
 def build_indices_table(state: DashboardState, config: Config, plans: PlanInfo) -> Panel:
     freshness = _data_freshness(plans.indices)
     streaming = state.ws_connected and plans.indices_has_ws
-    subtitle = _market_subtitle(freshness, state, streaming=streaming)
+    subtitle = _market_subtitle(freshness, state, streaming=streaming, show_extended=False)
 
     table = _build_market_table(state.indices, config.index_cols, INDEX_COLUMNS, state, large=True)
     return Panel(table, title="[bold grey70]INDICES[/bold grey70]", subtitle=f"[grey46]{subtitle}[/grey46]",
