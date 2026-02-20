@@ -5,14 +5,14 @@ import time
 import warnings
 from typing import Any, List
 
-from massive import RESTClient
 from rich.console import Console
 from rich.live import Live
 
 from fintra.config import parse_config, parse_watchlist, list_watchlists
 from fintra.constants import PROJECT_ROOT
-from fintra.data import fetch_market_data, fetch_crypto_data, fetch_economy_data, fetch_ytd_closes
+from fintra.data import fetch_market_data, fetch_crypto_data, fetch_economy_data, fetch_ytd_closes, fetch_ticker_details
 from fintra.plans import load_plans
+from fintra.provider import MassiveProvider
 from fintra.state import DashboardState
 from fintra.ui import build_layout, key_listener
 from fintra.websocket import start_ws_feeds, stop_ws_feeds
@@ -58,8 +58,8 @@ def main():
     # Suppress urllib3 SSL warning for LibreSSL
     warnings.filterwarnings("ignore", message=".*urllib3.*OpenSSL.*")
 
-    client = RESTClient(api_key=api_key)
-    plans = load_plans(client, api_key)
+    provider = MassiveProvider(api_key=api_key)
+    plans = load_plans(provider)
     state = DashboardState()
     state.active_watchlist_name = os.path.basename(watchlist_files[watchlist_idx])
 
@@ -78,28 +78,19 @@ def main():
     # Show dashboard immediately, populate data in background
     console = Console()
 
-    # Track WS client references for lifecycle management
-    ws_clients: List[Any] = []
+    # Track WS feed references for lifecycle management
+    ws_feeds: List[Any] = []
     was_open = False  # track market state transitions
     market_closed_at = None  # timestamp when market transitioned to closed
     DELAYED_GRACE = 15 * 60  # delayed feeds keep updating 15min after close
 
     def _check_market_status():
         try:
-            ms = client.get_market_status()
-            state.market_is_open = getattr(ms, "market", "") == "open"
-            # Parse per-group indices status from indicesGroups
-            ig = getattr(ms, "indices_groups", None) or getattr(ms, "indicesGroups", None)
-            if ig:
-                if isinstance(ig, dict):
-                    state.indices_group_status = ig
-                else:
-                    # Object with attributes — extract known groups
-                    for g in ("s_and_p", "dow_jones", "nasdaq", "ftse_russell",
-                              "societe_generale", "msci", "cccy"):
-                        val = getattr(ig, g, None)
-                        if val:
-                            state.indices_group_status[g] = val
+            status = provider.fetch_market_status()
+            state.market_is_open = status["market_is_open"]
+            groups = status.get("indices_groups", {})
+            if groups:
+                state.indices_group_status = groups
         except Exception:
             pass
 
@@ -113,27 +104,31 @@ def main():
 
     # Kick off all data fetches in background threads
     def _init_market():
-        nonlocal ws_clients, was_open
+        nonlocal ws_feeds, was_open
         _check_market_status()
         # Always do initial fetch to populate data regardless of market status
-        fetch_market_data(client, watchlist, state, plans)
-        fetch_crypto_data(client, watchlist, state, plans)
+        fetch_market_data(provider, watchlist, state, plans)
+        fetch_crypto_data(provider, watchlist, state, plans)
         if state.market_is_open:
-            ws_clients = start_ws_feeds(api_key, watchlist, state, plans)
+            ws_feeds = start_ws_feeds(provider, watchlist, state, plans)
             was_open = True
 
     threading.Thread(target=_init_market, daemon=True).start()
-    threading.Thread(target=fetch_economy_data, args=(client, state), daemon=True).start()
+    threading.Thread(target=fetch_economy_data, args=(provider, state), daemon=True).start()
 
     # Fetch YTD reference prices if any column config uses ytd%
     needs_ytd = "ytd%" in config.equity_cols or "ytd%" in config.index_cols
-    if needs_ytd:
-        def _ytd_after_economy():
+    needs_mktcap = "mktcap" in config.equity_cols
+    if needs_ytd or needs_mktcap:
+        def _deferred_fetches():
             # Wait for economy data to finish first to avoid rate limit contention
             while not state.economy_updated and not state.quit_flag:
                 time.sleep(1)
-            fetch_ytd_closes(client, watchlist, state)
-        threading.Thread(target=_ytd_after_economy, daemon=True).start()
+            if needs_ytd:
+                fetch_ytd_closes(provider, watchlist, state)
+            if needs_mktcap:
+                fetch_ticker_details(provider, watchlist, state)
+        threading.Thread(target=_deferred_fetches, daemon=True).start()
 
     last_market_fetch = time.time()
     last_economy_fetch = time.time()
@@ -165,8 +160,8 @@ def main():
                                 state.watchlist_error = f"{os.path.basename(new_path)}: no tickers"
                             else:
                                 # Stop existing WS feeds
-                                stop_ws_feeds(ws_clients)
-                                ws_clients = []
+                                stop_ws_feeds(ws_feeds)
+                                ws_feeds = []
                                 was_open = False
                                 market_closed_at = None
                                 # Reset state data
@@ -178,6 +173,7 @@ def main():
                                 state.inflation = {}
                                 state.prev_closes = {}
                                 state.ytd_closes = {}
+                                state.ticker_details = {}
                                 state.market_updated = None
                                 state.crypto_updated = None
                                 state.crypto_data_date = None
@@ -193,9 +189,9 @@ def main():
                                 state.active_watchlist_name = os.path.basename(new_path)
                                 # Re-kick data fetches
                                 threading.Thread(target=_init_market, daemon=True).start()
-                                threading.Thread(target=fetch_economy_data, args=(client, state), daemon=True).start()
-                                if needs_ytd:
-                                    threading.Thread(target=_ytd_after_economy, daemon=True).start()
+                                threading.Thread(target=fetch_economy_data, args=(provider, state), daemon=True).start()
+                                if needs_ytd or needs_mktcap:
+                                    threading.Thread(target=_deferred_fetches, daemon=True).start()
                                 last_market_fetch = now
                                 last_economy_fetch = now
                                 last_status_check = now
@@ -211,18 +207,18 @@ def main():
                     if state.market_is_open and not was_open:
                         # Market just opened — reconnect WS and do an initial fetch
                         market_closed_at = None
-                        ws_clients = start_ws_feeds(api_key, watchlist, state, plans)
-                        fetch_market_data(client, watchlist, state, plans)
-                        threading.Thread(target=fetch_crypto_data, args=(client, watchlist, state, plans), daemon=True).start()
+                        ws_feeds = start_ws_feeds(provider, watchlist, state, plans)
+                        fetch_market_data(provider, watchlist, state, plans)
+                        threading.Thread(target=fetch_crypto_data, args=(provider, watchlist, state, plans), daemon=True).start()
                         last_market_fetch = now
                         was_open = True
                     elif not state.market_is_open and was_open and market_closed_at is None:
                         # Market just closed
-                        fetch_market_data(client, watchlist, state, plans)
+                        fetch_market_data(provider, watchlist, state, plans)
                         if _all_realtime():
                             # Real-time feeds: stop immediately
-                            stop_ws_feeds(ws_clients)
-                            ws_clients = []
+                            stop_ws_feeds(ws_feeds)
+                            ws_feeds = []
                             was_open = False
                         else:
                             # Delayed feeds: keep running for 15 more minutes
@@ -230,9 +226,9 @@ def main():
 
                 # Expire delayed grace period
                 if market_closed_at is not None and now - market_closed_at >= DELAYED_GRACE:
-                    stop_ws_feeds(ws_clients)
-                    ws_clients = []
-                    fetch_market_data(client, watchlist, state, plans)
+                    stop_ws_feeds(ws_feeds)
+                    ws_feeds = []
+                    fetch_market_data(provider, watchlist, state, plans)
                     was_open = False
                     market_closed_at = None
 
@@ -240,7 +236,7 @@ def main():
                 eq_active = state.market_is_open or market_closed_at is not None
                 if eq_active:
                     if now - last_market_fetch >= effective_refresh:
-                        fetch_market_data(client, watchlist, state, plans)
+                        fetch_market_data(provider, watchlist, state, plans)
                         last_market_fetch = now
                         if state.rate_limited:
                             effective_refresh = min(config.refresh_interval * 4, 120)
@@ -249,11 +245,11 @@ def main():
 
                 # Crypto: starter plan polls 24/7 (real-time), basic only when market active (end-of-day)
                 if plans.currencies_has_snapshots or eq_active:
-                    threading.Thread(target=fetch_crypto_data, args=(client, watchlist, state, plans), daemon=True).start()
+                    threading.Thread(target=fetch_crypto_data, args=(provider, watchlist, state, plans), daemon=True).start()
 
                 # Economy data refresh (independent of market hours)
                 if now - last_economy_fetch >= config.economy_interval:
-                    threading.Thread(target=fetch_economy_data, args=(client, state), daemon=True).start()
+                    threading.Thread(target=fetch_economy_data, args=(provider, state), daemon=True).start()
                     last_economy_fetch = now
 
                 live.update(build_layout(state, watchlist, config, plans))
@@ -263,7 +259,7 @@ def main():
         pass
     finally:
         state.quit_flag = True
-        stop_ws_feeds(ws_clients)
+        stop_ws_feeds(ws_feeds)
         # Restore original terminal settings
         if _original_termios:
             try:

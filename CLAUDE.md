@@ -27,8 +27,9 @@ Fintra/                        # project root
     ├── config.py              # Config dataclass, parse_config, parse_interval, parse_watchlist
     ├── state.py               # DashboardState dataclass
     ├── plans.py               # PlanInfo dataclass, probe/load/save plans
+    ├── provider.py            # MassiveProvider — sole module importing from massive SDK
     ├── formatting.py          # fmt_price, fmt_change, fmt_pct, fmt_volume, fmt_yield_val, display_name
-    ├── data.py                # All data fetching: market, crypto, economy, YTD, normalization helpers
+    ├── data.py                # Data fetching orchestration: market, crypto, economy, YTD, caching
     ├── websocket.py           # WS streaming: start/stop feeds, _update_ticker, message handler
     ├── ui.py                  # Table/panel builders, layout, header, key_listener
     └── app.py                 # main() orchestration loop
@@ -74,8 +75,23 @@ Run with: `python -m fintra`
 ### `plans.py`
 - `PlanInfo` dataclass — detected API plan per asset class (stocks, indices, currencies)
   - Properties: `stocks_has_snapshots`, `stocks_has_ws`, `stocks_realtime`, `indices_has_snapshots`, `indices_has_ws`, `indices_realtime`, `currencies_has_snapshots`, `currencies_has_ws`, `currencies_unlimited`
-- `_probe_plans()` — probes snapshot endpoints to detect plan tier
-- `load_plans()` / `save_plans()` — cached in `.plans.json`
+- `_probe_plans(provider)` — calls `provider.probe_snapshots()` to detect plan tier
+- `load_plans(provider)` / `save_plans()` — cached in `.plans.json`
+
+### `provider.py`
+- **Only module that imports from `massive`** — all SDK types (`RESTClient`, `WebSocketClient`, `Feed`, `Market`, message models) are isolated here
+- `MassiveProvider` class — wraps the Massive SDK; all other modules receive a provider instance and work with plain dicts
+  - `fetch_snapshots(tickers)` → list of flat dicts (`ticker`, `last`, `open`, `high`, `low`, `volume`, `change`, `change_pct`, `prev_close`)
+  - `fetch_aggs(ticker, multiplier, timespan, from_date, to_date)` → list of bar dicts (`open`, `high`, `low`, `close`, `volume`, `timestamp`)
+  - `fetch_market_status()` → `{"market_is_open": bool, "indices_groups": dict}`
+  - `fetch_treasury_yields()` → dict with `yield_*` keys + `"date"`
+  - `fetch_labor_market()` → dict with `unemployment_rate`, `participation_rate`, `avg_hourly_earnings`, `date`
+  - `fetch_inflation(limit=13)` → list of dicts with `cpi`, `cpi_core`, `date`
+  - `fetch_ticker_details(ticker)` → `{"market_cap": float|None}`
+  - `probe_snapshots(ticker)` → bool (used by plans.py for plan detection)
+  - `create_ws_feed(market, feed_type, tickers, on_update)` → `WsFeed` with `.run()` / `.close()`
+- `WsFeed` class — thin wrapper around `WebSocketClient`; `.run()` dispatches parsed messages via `on_update(ticker, price, extras_dict)` callback
+- `_normalize_snapshot()` — static method; converts SDK snapshot objects to flat dicts (moved from data.py)
 
 ### `formatting.py`
 - `fmt_price(val, large)` — returns cyan `Text`; uses comma separator when `large=True`
@@ -86,22 +102,24 @@ Run with: `python -m fintra`
 - `display_name(ticker)` — ticker → friendly name via `DISPLAY_NAMES`
 
 ### `data.py`
-- `normalize_snapshot()` — converts REST snapshot to flat dict; tries `session.close`, then `last_trade.price`, then `last_quote` midpoint, then top-level `price`/`value`
-- `_normalize_crypto_agg()` — converts crypto agg + previous close to flat dict
-- `_fetch_via_aggs()` — fallback for Basic plan: fetch via `get_aggs` instead of snapshots
-- `fetch_market_data()` — REST snapshots (Starter+) or aggs fallback (Basic) for stocks+indices. Caches `prev_closes`.
-- `fetch_crypto_data()` — snapshots (Starter) or rate-limited `get_aggs` (Basic). Lock prevents overlapping fetches. Atomic swap on full success, merge on partial. Stores `crypto_data_date` from agg timestamp for basic plan.
-- `fetch_ytd_closes()` — fetches Dec 31 closing prices for YTD % column
+- Does **not** import from `massive` — all API calls go through `provider: MassiveProvider`
+- `_normalize_crypto_agg()` — converts crypto agg dict + previous close dict to flat dict (uses `dict.get()`)
+- `_fetch_via_aggs(provider, ...)` — fallback for Basic plan: calls `provider.fetch_aggs()` instead of snapshots
+- `fetch_market_data(provider, ...)` — calls `provider.fetch_snapshots()` (Starter+) or aggs fallback (Basic). Reads `prev_close` from returned dicts, adds `name` via `display_name()`.
+- `fetch_crypto_data(provider, ...)` — calls `provider.fetch_snapshots()` (Starter) or `provider.fetch_aggs()` (Basic). Lock prevents overlapping fetches. Atomic swap on full success, merge on partial. Stores `crypto_data_date` from agg timestamp for basic plan.
+- `fetch_ytd_closes(provider, ...)` — calls `provider.fetch_aggs()`, reads `agg["close"]`
+- `fetch_ticker_details(provider, ...)` — calls `provider.fetch_ticker_details()`
 - `_fetch_with_timeout()` — wraps callable in thread with timeout to prevent hanging on 429 retries
 - `_fetch_economy_endpoint()` — retry wrapper for economy endpoints
 - `_last_market_close()` — returns Unix timestamp of the most recent NYSE close (4 PM ET), skipping weekends
 - `_load_econ_cache()` / `_save_econ_cache()` — disk cache for economy data in `.econ_cache.json`, invalidated after market close
-- `fetch_economy_data()` — checks cache first; if stale, makes 3 sequential REST calls (treasury, labor, inflation) spaced 15s apart and saves cache on success. Uses `next(iter(...))` NOT `list()`.
+- `fetch_economy_data(provider, ...)` — checks cache first; if stale, calls `provider.fetch_treasury_yields()`, `.fetch_labor_market()`, `.fetch_inflation()` spaced 15s apart
 
 ### `websocket.py`
+- Does **not** import from `massive` — WS feeds created via `provider.create_ws_feed()`
 - `_update_ticker()` — updates a ticker dict in state with new price, recalculates change/change_pct from `prev_closes`, updates high/low/volume with min/max logic
-- `start_ws_feeds()` — launches WS background threads per entitled asset class. Stocks use `A.<ticker>` (second aggs), indices use `V.<ticker>` (index values), crypto uses `XA.<ticker>`. Feed type selected based on plan (Delayed vs RealTime). Returns client list for lifecycle management.
-- `stop_ws_feeds()` — closes all WS client connections
+- `start_ws_feeds(provider, ...)` — calls `provider.create_ws_feed()` per entitled asset class with callbacks that invoke `_update_ticker()`. Returns `WsFeed` list for lifecycle management.
+- `stop_ws_feeds()` — calls `.close()` on each `WsFeed` instance
 
 ### `ui.py`
 - `_cell_value()` — returns formatted cell value for a column key + data item. "symbol" returns raw ticker, "name" returns `display_name()`. "open_close" toggles between open/close based on `market_is_open`.
@@ -120,8 +138,10 @@ Run with: `python -m fintra`
 **Visual styling:** All panel borders `grey70`, titles `[bold grey70]`, subtitles `[grey46]`. Neutral values (prices, volume, yields, economy) in cyan; changes green/red.
 
 ### `app.py`
+- Does **not** import from `massive` — creates `MassiveProvider` and passes it to all modules
 - `main()`:
   - Loads `.env` manually (no python-dotenv dependency)
+  - Creates `MassiveProvider(api_key)` — single provider instance shared across all modules
   - Saves original termios settings, restores on exit
   - Suppresses urllib3 SSL warning for LibreSSL
   - Shows dashboard immediately with blank values
@@ -129,7 +149,7 @@ Run with: `python -m fintra`
   - Kicks off `fetch_economy_data` thread (3 calls spaced 15s apart)
   - Optionally kicks off YTD close fetch after economy finishes (if ytd% column configured)
   - **Delayed grace period:** delayed (non-realtime) feeds continue for 15 minutes after market close (`DELAYED_GRACE = 15 * 60`). Real-time feeds stop immediately on close.
-  - `_check_market_status()` — polls market status every 60s, parses `indicesGroups` into `state.indices_group_status`
+  - `_check_market_status()` — calls `provider.fetch_market_status()`, reads dict keys into state
   - `_all_realtime()` — returns True if all entitled feeds are real-time (determines if grace period needed)
   - **Crypto polling:** Starter plan (real-time snapshots) polls 24/7. Basic plan (end-of-day aggs) only polls while US equities market is active.
   - `eq_active` flag — True when market open OR in delayed grace period; gates equities/indices REST polling
@@ -139,7 +159,9 @@ Run with: `python -m fintra`
 
 ## API Compatibility
 
-| Feature | Plan Needed | Client Call | Key Gotchas |
+These are the underlying Massive SDK calls used inside `provider.py`. No other module calls these directly.
+
+| Feature | Plan Needed | SDK Call (in provider.py) | Key Gotchas |
 |---------|------------|-------------|-------------|
 | Stock/index snapshots | Stocks/Indices Starter | `list_universal_snapshots(ticker_any_of=<list>)` | Must pass Python list, NOT comma-separated string |
 | Stock WS second aggs | Stocks Starter | `WebSocketClient(Feed.Delayed, Market.Stocks)` → `A.*` | `Feed.StarterFeed` returns "not authorized"; must use `Feed.Delayed` |
@@ -153,6 +175,7 @@ Run with: `python -m fintra`
 
 ## Key Design Decisions
 
+- **Provider isolation** — only `provider.py` imports from `massive`; all other modules work with plain dicts. `MassiveProvider` translates SDK types → dicts; no retry logic, caching, or state mutation inside the provider
 - **Never blank data on failure** — state lists only overwritten when new data is fetched successfully
 - **Background-first startup** — dashboard renders immediately, all API calls happen in background threads
 - **Rate limit awareness** — crypto enforces `num_tickers * 12s` minimum interval; economy spaces calls 15s apart; REST polls back off 4x on 429

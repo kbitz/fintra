@@ -2,8 +2,6 @@ import json
 import os
 from dataclasses import dataclass
 
-from massive import RESTClient
-
 from fintra.constants import PLANS_PATH
 
 
@@ -54,41 +52,23 @@ class PlanInfo:
         return self.currencies == "starter"
 
 
-def _probe_plans(client: RESTClient, api_key: str) -> PlanInfo:
+def _probe_plans(provider) -> PlanInfo:
     """Probe API endpoints to detect plan tier for each asset class."""
     plans = PlanInfo()
 
-    # Probe stocks: try snapshot
-    try:
-        snaps = list(client.list_universal_snapshots(ticker_any_of=["AAPL"]))
-        has_snap = any(not getattr(s, "error", None) for s in snaps)
-        if has_snap:
-            plans.stocks = "starter"  # at minimum
-    except Exception:
-        pass
+    if provider.probe_snapshots("AAPL"):
+        plans.stocks = "starter"
 
-    # Probe indices: try snapshot
-    try:
-        snaps = list(client.list_universal_snapshots(ticker_any_of=["I:SPX"]))
-        has_snap = any(not getattr(s, "error", None) for s in snaps)
-        if has_snap:
-            plans.indices = "starter"
-    except Exception:
-        pass
+    if provider.probe_snapshots("I:SPX"):
+        plans.indices = "starter"
 
-    # Probe currencies: try snapshot
-    try:
-        snaps = list(client.list_universal_snapshots(ticker_any_of=["X:BTCUSD"]))
-        has_snap = any(not getattr(s, "error", None) for s in snaps)
-        if has_snap:
-            plans.currencies = "starter"
-    except Exception:
-        pass
+    if provider.probe_snapshots("X:BTCUSD"):
+        plans.currencies = "starter"
 
     return plans
 
 
-def load_plans(client: RESTClient, api_key: str) -> PlanInfo:
+def load_plans(provider) -> PlanInfo:
     """Load cached plan info or probe if not cached."""
     if os.path.exists(PLANS_PATH):
         try:
@@ -105,7 +85,7 @@ def load_plans(client: RESTClient, api_key: str) -> PlanInfo:
 
     # No cache — probe and save
     print("[fintra] Detecting API plan entitlements...")
-    plans = _probe_plans(client, api_key)
+    plans = _probe_plans(provider)
     save_plans(plans)
     print(f"[fintra] Detected: stocks={plans.stocks}, indices={plans.indices}, currencies={plans.currencies}")
     return plans

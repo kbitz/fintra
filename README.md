@@ -142,7 +142,7 @@ Each section's subtitle shows data freshness and market status. Prices, volumes,
 
 ## Architecture
 
-Python package (`fintra/`) with 7 core modules:
+Python package (`fintra/`) with 8 core modules:
 
 | Module | Purpose |
 |--------|---------|
@@ -150,18 +150,21 @@ Python package (`fintra/`) with 7 core modules:
 | `config.py` | Config parsing (config.ini, watchlist.txt) |
 | `state.py` | `DashboardState` dataclass (shared mutable state) |
 | `plans.py` | API plan detection and caching |
+| `provider.py` | `MassiveProvider` — sole module importing from the Massive SDK |
 | `formatting.py` | Price/change/volume formatting helpers |
-| `data.py` | All REST data fetching (market, crypto, economy) |
+| `data.py` | Data fetching orchestration (market, crypto, economy, caching) |
 | `websocket.py` | WebSocket streaming for real-time updates |
 | `ui.py` | Rich table/panel builders, layout, key listener |
 | `app.py` | Main orchestration loop |
 
+All Massive SDK access is isolated in `provider.py`. Every other module works with plain Python dicts — no SDK types leak beyond the provider boundary.
+
 How it works:
 
 1. Dashboard renders immediately with blank values
-2. Plan entitlements detected (or loaded from cache)
-3. Background threads fetch REST data (market snapshots, crypto aggs, economy)
-4. WebSocket feeds start for entitled asset classes on appropriate feed type (Delayed or RealTime)
+2. `MassiveProvider` created with API key; plan entitlements detected (or loaded from cache)
+3. Background threads fetch REST data via provider methods (snapshots, aggs, economy)
+4. WebSocket feeds start via `provider.create_ws_feed()` for entitled asset classes
 5. Main loop renders the Rich layout at 2fps from shared `DashboardState`
 6. REST continues polling on `refresh_interval` as a safety net alongside WS
 7. Delayed feeds continue 15 minutes after market close; real-time feeds stop immediately
