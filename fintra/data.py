@@ -106,9 +106,14 @@ def _fetch_via_aggs(provider, tickers: List[str], state: DashboardState) -> List
     return results
 
 
+_market_lock = threading.Lock()
+
+
 def fetch_market_data(provider, watchlist: Dict[str, List[str]],
                       state: DashboardState, plans: PlanInfo):
     """Fetch data for stocks/indices. Uses snapshots if available, else aggs fallback."""
+    if not _market_lock.acquire(blocking=False):
+        return
     try:
         # Determine which tickers can use snapshots
         snap_tickers = []
@@ -178,6 +183,8 @@ def fetch_market_data(provider, watchlist: Dict[str, List[str]],
         else:
             state.market_error = str(e)[:80]
         state.market_stale = True
+    finally:
+        _market_lock.release()
 
 
 # Crypto fetch state — lock prevents overlapping fetches from racing
@@ -240,7 +247,7 @@ def fetch_crypto_data(provider, watchlist: Dict[str, List[str]],
                     if aggs:
                         ts = aggs[-1].get("timestamp")
                         if ts:
-                            state.crypto_data_date = datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d")
+                            state.crypto_data_date = datetime.utcfromtimestamp(ts / 1000).strftime("%Y-%m-%d")
                 except Exception:
                     pass
                 time.sleep(1)

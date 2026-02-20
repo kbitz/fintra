@@ -5,6 +5,46 @@ from typing import Any, Dict, List
 from fintra.plans import PlanInfo
 from fintra.state import DashboardState
 
+# Track which feeds are currently connected
+_connected_feeds: set = set()
+_connected_lock = threading.Lock()
+
+
+def _set_connected(label: str, connected: bool, state: DashboardState):
+    """Update the connected feeds set and state flag."""
+    with _connected_lock:
+        if connected:
+            _connected_feeds.add(label)
+        else:
+            _connected_feeds.discard(label)
+        state.ws_connected = bool(_connected_feeds)
+
+
+class WsFeedHandle:
+    """Handle for a WebSocket feed with automatic reconnection."""
+
+    def __init__(self):
+        self._stopped = False
+        self._current_feed = None
+        self._lock = threading.Lock()
+
+    def set_feed(self, feed):
+        with self._lock:
+            self._current_feed = feed
+
+    @property
+    def stopped(self):
+        return self._stopped
+
+    def close(self):
+        self._stopped = True
+        with self._lock:
+            if self._current_feed:
+                try:
+                    self._current_feed.close()
+                except Exception:
+                    pass
+
 
 def _update_ticker(items: List[Dict[str, Any]], ticker: str, last: float,
                    prev_closes: Dict[str, float], **extra):
@@ -28,23 +68,45 @@ def _update_ticker(items: List[Dict[str, Any]], ticker: str, last: float,
     return False
 
 
-def start_ws_feeds(provider, watchlist: Dict[str, List[str]],
-                   state: DashboardState, plans: PlanInfo) -> List[Any]:
-    """Start WebSocket feeds for real-time price updates in background threads.
-
-    Returns list of WsFeed instances so they can be closed later.
-    Only starts WS feeds for plans that support WebSockets.
-    """
-    feeds: List[Any] = []
-
-    def _run_feed(feed, label):
+def _run_feed_with_reconnect(handle, provider, market, feed_type, tickers,
+                              on_update, state, label):
+    """Run a WS feed, reconnecting automatically on disconnect with backoff."""
+    backoff = 1
+    max_backoff = 60
+    while not handle.stopped and not state.quit_flag:
         try:
-            state.ws_connected = True
+            feed = provider.create_ws_feed(market, feed_type, tickers, on_update)
+            handle.set_feed(feed)
+            if handle.stopped:
+                try:
+                    feed.close()
+                except Exception:
+                    pass
+                return
+            _set_connected(label, True, state)
+            backoff = 1  # reset on successful connection
             feed.run()
         except Exception:
             pass
         finally:
-            state.ws_connected = False
+            _set_connected(label, False, state)
+            handle.set_feed(None)
+        # Backoff before reconnecting (check stop flag frequently)
+        for _ in range(int(backoff * 2)):
+            if handle.stopped or state.quit_flag:
+                return
+            time.sleep(0.5)
+        backoff = min(backoff * 2, max_backoff)
+
+
+def start_ws_feeds(provider, watchlist: Dict[str, List[str]],
+                   state: DashboardState, plans: PlanInfo) -> List[WsFeedHandle]:
+    """Start WebSocket feeds with automatic reconnection in background threads.
+
+    Returns list of WsFeedHandle instances so they can be closed later.
+    Only starts WS feeds for plans that support WebSockets.
+    """
+    handles: List[WsFeedHandle] = []
 
     # Stocks feed — only if plan supports WebSockets (Starter+)
     if watchlist["equities"] and plans.stocks_has_ws:
@@ -54,10 +116,12 @@ def start_ws_feeds(provider, watchlist: Dict[str, List[str]],
             _update_ticker(state.equities, ticker, price, state.prev_closes, **extras)
             state.market_updated = time.time()
 
-        stock_feed = provider.create_ws_feed("stocks", feed_type,
-                                             watchlist["equities"], _on_stock)
-        feeds.append(stock_feed)
-        threading.Thread(target=_run_feed, args=(stock_feed, "stocks"), daemon=True).start()
+        handle = WsFeedHandle()
+        handles.append(handle)
+        threading.Thread(target=_run_feed_with_reconnect,
+                        args=(handle, provider, "stocks", feed_type,
+                              watchlist["equities"], _on_stock, state, "stocks"),
+                        daemon=True).start()
 
     # Indices feed — only if plan supports WebSockets (Starter+)
     if watchlist["indices"] and plans.indices_has_ws:
@@ -67,10 +131,12 @@ def start_ws_feeds(provider, watchlist: Dict[str, List[str]],
             _update_ticker(state.indices, ticker, price, state.prev_closes, **extras)
             state.market_updated = time.time()
 
-        index_feed = provider.create_ws_feed("indices", feed_type,
-                                             watchlist["indices"], _on_index)
-        feeds.append(index_feed)
-        threading.Thread(target=_run_feed, args=(index_feed, "indices"), daemon=True).start()
+        handle = WsFeedHandle()
+        handles.append(handle)
+        threading.Thread(target=_run_feed_with_reconnect,
+                        args=(handle, provider, "indices", feed_type,
+                              watchlist["indices"], _on_index, state, "indices"),
+                        daemon=True).start()
 
     # Crypto feed — only if Currencies Starter
     if watchlist["crypto"] and plans.currencies_has_ws:
@@ -78,16 +144,18 @@ def start_ws_feeds(provider, watchlist: Dict[str, List[str]],
             _update_ticker(state.crypto, ticker, price, state.prev_closes, **extras)
             state.market_updated = time.time()
 
-        crypto_feed = provider.create_ws_feed("crypto", "realtime",
-                                              watchlist["crypto"], _on_crypto)
-        feeds.append(crypto_feed)
-        threading.Thread(target=_run_feed, args=(crypto_feed, "crypto"), daemon=True).start()
+        handle = WsFeedHandle()
+        handles.append(handle)
+        threading.Thread(target=_run_feed_with_reconnect,
+                        args=(handle, provider, "crypto", "realtime",
+                              watchlist["crypto"], _on_crypto, state, "crypto"),
+                        daemon=True).start()
 
-    return feeds
+    return handles
 
 
-def stop_ws_feeds(feeds: List[Any]):
-    """Close all WebSocket feed connections."""
+def stop_ws_feeds(feeds: List[WsFeedHandle]):
+    """Close all WebSocket feed connections and stop reconnection."""
     for f in feeds:
         try:
             f.close()

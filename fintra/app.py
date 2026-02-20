@@ -133,6 +133,7 @@ def main():
     last_market_fetch = time.time()
     last_economy_fetch = time.time()
     last_status_check = time.time()
+    last_crypto_fetch = time.time()
 
     effective_refresh = config.refresh_interval
 
@@ -195,6 +196,7 @@ def main():
                                 last_market_fetch = now
                                 last_economy_fetch = now
                                 last_status_check = now
+                                last_crypto_fetch = now
                         except Exception as e:
                             state.watchlist_error = f"{os.path.basename(new_path)}: {e}"
 
@@ -208,13 +210,14 @@ def main():
                         # Market just opened — reconnect WS and do an initial fetch
                         market_closed_at = None
                         ws_feeds = start_ws_feeds(provider, watchlist, state, plans)
-                        fetch_market_data(provider, watchlist, state, plans)
+                        threading.Thread(target=fetch_market_data, args=(provider, watchlist, state, plans), daemon=True).start()
                         threading.Thread(target=fetch_crypto_data, args=(provider, watchlist, state, plans), daemon=True).start()
                         last_market_fetch = now
+                        last_crypto_fetch = now
                         was_open = True
                     elif not state.market_is_open and was_open and market_closed_at is None:
                         # Market just closed
-                        fetch_market_data(provider, watchlist, state, plans)
+                        threading.Thread(target=fetch_market_data, args=(provider, watchlist, state, plans), daemon=True).start()
                         if _all_realtime():
                             # Real-time feeds: stop immediately
                             stop_ws_feeds(ws_feeds)
@@ -228,24 +231,29 @@ def main():
                 if market_closed_at is not None and now - market_closed_at >= DELAYED_GRACE:
                     stop_ws_feeds(ws_feeds)
                     ws_feeds = []
-                    fetch_market_data(provider, watchlist, state, plans)
+                    threading.Thread(target=fetch_market_data, args=(provider, watchlist, state, plans), daemon=True).start()
                     was_open = False
                     market_closed_at = None
+
+                # Adjust refresh rate when rate-limited
+                if state.rate_limited:
+                    effective_refresh = min(config.refresh_interval * 4, 120)
+                else:
+                    effective_refresh = config.refresh_interval
 
                 # Equities/indices: active when market open OR in delayed grace period
                 eq_active = state.market_is_open or market_closed_at is not None
                 if eq_active:
                     if now - last_market_fetch >= effective_refresh:
-                        fetch_market_data(provider, watchlist, state, plans)
+                        threading.Thread(target=fetch_market_data, args=(provider, watchlist, state, plans), daemon=True).start()
                         last_market_fetch = now
-                        if state.rate_limited:
-                            effective_refresh = min(config.refresh_interval * 4, 120)
-                        else:
-                            effective_refresh = config.refresh_interval
 
-                # Crypto: starter plan polls 24/7 (real-time), basic only when market active (end-of-day)
+                # Crypto: starter plan polls at refresh interval, basic hourly (data is daily)
+                crypto_interval = effective_refresh if plans.currencies_has_snapshots else 3600
                 if plans.currencies_has_snapshots or eq_active:
-                    threading.Thread(target=fetch_crypto_data, args=(provider, watchlist, state, plans), daemon=True).start()
+                    if now - last_crypto_fetch >= crypto_interval:
+                        threading.Thread(target=fetch_crypto_data, args=(provider, watchlist, state, plans), daemon=True).start()
+                        last_crypto_fetch = now
 
                 # Economy data refresh (independent of market hours)
                 if now - last_economy_fetch >= config.economy_interval:
