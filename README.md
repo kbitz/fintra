@@ -1,5 +1,7 @@
 # Fintra — Terminal Market Dashboard
 
+![Fintra dashboard](screenshot.png)
+
 A real-time terminal dashboard for equities, crypto, indices, and economic data. Built with the [Massive.com](https://massive.com) (Polygon.io) API and rendered with [Rich](https://github.com/Textualize/rich).
 
 Stocks and indices stream per-second via WebSocket on Starter+ plans. Crypto polls on a rate-limited interval. Treasury yields and economic indicators load in the background on startup.
@@ -55,33 +57,46 @@ refresh_interval = 10s    # 10s, 1m, 5m, 15m, 1h
 # How often economy data refreshes (changes at most daily)
 economy_interval = 1d     # 1h, 6h, 1d
 
-# Columns per section (comma-separated)
-# Equities: symbol, name, last, chg, chg%, open_close, open, high, low, vol, ytd%
-equities_columns = symbol, last, chg, chg%, open_close, high, low, vol
+# Columns per section (comma-separated). Symbol is always shown first.
+# Equities: last, chg, chg%, open_close, open, high, low, vol, mktcap, ytd%
+equities_columns = last, chg, chg%, open_close, high, low, vol
 
-# Indices: symbol, name, last, chg, chg%, open_close, open, high, low, ytd%
-indices_columns = name, last, chg, chg%, open_close, high, low
+# Indices: last, chg, chg%, open_close, open, high, low, ytd%
+indices_columns = last, chg, chg%, open_close, high, low
 
-# Crypto: symbol, name, last, chg, chg%
-crypto_columns = name, last, chg, chg%
+# Crypto: last, chg, chg%
+crypto_columns = last, chg, chg%
 ```
 
 Time units: `s` (seconds), `m` (minutes), `h` (hours), `d` (days).
 
 Column notes:
-- `symbol` shows the raw ticker (e.g. `AAPL`, `I:SPX`)
-- `name` shows the display name (e.g. `S&P 500`, `BTC/USD`)
+- The symbol column is always present as the first column and cannot be removed
 - `open_close` toggles between Open and Close based on market status
 
-### watchlist.txt
+### Watchlists
 
-One ticker per line, organized by section:
+Place `.txt` files in `watchlists/`. One ticker per line, organized by section. Press `l` to cycle between watchlists at runtime.
+
+Within `[equities]`, use `## Group Name` headers to create visual sub-groups:
 
 ```
 [equities]
+## Mag 7
 AAPL
 MSFT
 NVDA
+AMZN
+GOOGL
+META
+TSLA
+
+## Nifty Fifty
+IBM
+KO
+JNJ
+PG
+MCD
 
 [crypto]
 X:BTCUSD
@@ -89,24 +104,19 @@ X:ETHUSD
 
 [indices]
 I:SPX
-I:DJI
+I:DJA
 I:NDX
 I:VIX
 
 [treasury]
-1M
 3M
 2Y
-5Y
 10Y
 30Y
 
 [economy]
 unemployment
-participation
-avg_hourly_wage
-cpi
-core_cpi
+cpi_yoy
 ```
 
 **Ticker format:**
@@ -123,13 +133,13 @@ core_cpi
 
 Sections are displayed in this order:
 
-| Section | Columns | Subtitle |
-|---------|---------|----------|
-| **Indices** | Name, Last, Chg, Chg%, ... | Freshness + "market closed" when applicable |
-| **Equities** | Symbol, Last, Chg, Chg%, Open, High, Low, Vol | Freshness + "market closed" when applicable |
-| **Crypto** | Name, Last, Chg, Chg% | Starter: "real-time, polled Xs ago"; Basic: data date |
-| **Treasury Yields** | Maturity, Yield | Data date (YYYY-MM-DD) |
-| **Economy** | Indicator, Value | Data date (Mon YYYY) |
+| Section | Subtitle |
+|---------|----------|
+| **Indices** | Freshness + "market closed" when applicable |
+| **Equities** | Freshness + "market closed" when applicable |
+| **Crypto** | Starter: "real-time, polled Xs ago"; Basic: data date |
+| **Treasury Yields** | Data date (YYYY-MM-DD) |
+| **Economy** | Data date (Mon YYYY) |
 
 Each section's subtitle shows data freshness and market status. Prices, volumes, yields, and economy values are displayed in cyan; changes are green (positive) or red (negative).
 
@@ -137,6 +147,7 @@ Each section's subtitle shows data freshness and market status. Prices, volumes,
 
 | Key | Action |
 |-----|--------|
+| `l` | Cycle watchlists |
 | `q` | Quit cleanly |
 | `Ctrl+C` | Quit (fallback) |
 
@@ -146,7 +157,7 @@ Python package (`fintra/`) with 8 core modules:
 
 | Module | Purpose |
 |--------|---------|
-| `constants.py` | Display names, yield/economy fields, column definitions |
+| `constants.py` | Yield/economy fields, column definitions, paths |
 | `config.py` | Config parsing (config.ini, watchlist.txt) |
 | `state.py` | `DashboardState` dataclass (shared mutable state) |
 | `plans.py` | API plan detection and caching |
