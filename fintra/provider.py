@@ -1,7 +1,6 @@
 """Massive API provider — the only module that imports from massive."""
 
-import threading
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List
 
 from massive import RESTClient
 from massive import WebSocketClient
@@ -183,7 +182,7 @@ class MassiveProvider:
     @staticmethod
     def _normalize_snapshot(snap: Any, ticker: str) -> Dict[str, Any]:
         """Convert an API snapshot object to a flat dict."""
-        d: Dict[str, Any] = {"ticker": ticker}
+        d: Dict[str, Any] = {"ticker": ticker, "name": getattr(snap, "name", None) or ticker}
 
         session = getattr(snap, "session", None)
         if session:

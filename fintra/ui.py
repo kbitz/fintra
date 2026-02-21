@@ -10,13 +10,13 @@ from rich.text import Text
 
 from fintra.config import Config
 from fintra.constants import (
-    EQUITY_COLUMNS, INDEX_COLUMNS, CRYPTO_COLUMNS,
+    EQUITY_COLUMNS, INDEX_COLUMNS, CRYPTO_COLUMNS, SYMBOL_MIN_WIDTH,
     ALL_YIELD_FIELDS, DEFAULT_YIELD_KEYS,
     ALL_ECONOMY_FIELDS, DEFAULT_ECONOMY_KEYS,
 )
 from fintra.formatting import (
     fmt_price, fmt_change, fmt_pct, fmt_volume, fmt_market_cap, fmt_yield_val,
-    fmt_ext_chg, fmt_ext_pct, fmt_ext_price, display_name,
+    fmt_ext_chg, fmt_ext_pct,
 )
 from fintra.plans import PlanInfo
 from fintra.state import DashboardState
@@ -54,11 +54,7 @@ def _regular_close(item: Dict[str, Any]):
 
 def _cell_value(col_key: str, item: Dict[str, Any], state: DashboardState, large: bool = False):
     """Return the formatted cell value for a given column key and data item."""
-    if col_key == "symbol":
-        return item["ticker"]
-    elif col_key == "name":
-        return display_name(item["ticker"])
-    elif col_key == "last":
+    if col_key == "last":
         if not state.market_is_open:
             ext_chg, ext_pct, label = _get_ext_hours(item)
             if label is not None and ext_chg is not None:
@@ -127,25 +123,31 @@ def _cell_value(col_key: str, item: Dict[str, Any], state: DashboardState, large
 
 
 def _build_market_table(items: List[Dict[str, Any]], col_keys: List[str],
-                        col_defs: dict, state: DashboardState, large: bool = False) -> Table:
-    """Build a Rich Table from data items using the given column configuration."""
+                        col_defs: dict, state: DashboardState,
+                        large: bool = False, symbol_width: int = 6) -> Table:
+    """Build a Rich Table from data items using the given column configuration.
+
+    A symbol column (no header) is always prepended automatically.
+    """
     table = Table(expand=True, box=None, padding=(0, 1))
 
-    for key in col_keys:
-        if key not in col_defs:
-            continue
+    # Symbol column — always first, no header
+    table.add_column("", justify="left", min_width=symbol_width, style="bold white")
+
+    valid_keys = [key for key in col_keys if key in col_defs]
+    for key in valid_keys:
         label, justify, min_width = col_defs[key]
-        # Toggle open_close header based on market status
         if key == "open_close":
             label = "Open" if state.market_is_open else "Close"
         style = "bold white" if justify == "left" else None
         table.add_column(label, justify=justify, min_width=min_width, style=style)
 
     if not items:
-        table.add_row(*["—"] * len(col_keys))
+        table.add_row("—", *["—"] * len(valid_keys))
     else:
         for item in items:
-            row = [_cell_value(k, item, state, large=large) for k in col_keys if k in col_defs]
+            symbol = item["ticker"].split(":", 1)[-1]
+            row = [symbol] + [_cell_value(k, item, state, large=large) for k in valid_keys]
             table.add_row(*row)
 
     return table
@@ -198,12 +200,70 @@ def _market_subtitle(freshness: str, state: DashboardState, streaming: bool = Fa
     return ", ".join(parts)
 
 
-def build_equities_table(state: DashboardState, config: Config, plans: PlanInfo) -> Panel:
+def _build_grouped_equities_table(items: List[Dict[str, Any]], col_keys: List[str],
+                                   col_defs: dict, state: DashboardState,
+                                   equity_groups: list) -> Table:
+    """Build an equities table with section dividers for named groups.
+
+    A symbol column (no header) is always prepended automatically.
+    """
+    table = Table(expand=True, box=None, padding=(0, 1))
+
+    # Symbol column — always first, no header
+    table.add_column("", justify="left", min_width=SYMBOL_MIN_WIDTH["equity"], style="bold white")
+
+    valid_keys = [key for key in col_keys if key in col_defs]
+    for key in valid_keys:
+        label, justify, min_width = col_defs[key]
+        if key == "open_close":
+            label = "Open" if state.market_is_open else "Close"
+        style = "bold white" if justify == "left" else None
+        table.add_column(label, justify=justify, min_width=min_width, style=style)
+
+    num_cols = len(valid_keys) + 1  # +1 for symbol
+    if not items:
+        table.add_row(*["—"] * num_cols)
+        return table
+
+    # Map ticker → group index
+    ticker_to_group = {}
+    for idx, (name, tickers) in enumerate(equity_groups):
+        for t in tickers:
+            ticker_to_group[t] = idx
+
+    current_group_idx = -1
+    row_count = 0
+
+    for item in items:
+        group_idx = ticker_to_group.get(item["ticker"], -1)
+
+        if group_idx >= 0 and group_idx != current_group_idx:
+            if row_count > 0:
+                table.add_row(*[""] * num_cols)  # padding
+            table.add_row(Text(equity_groups[group_idx][0], style="dim bold"),
+                          *[""] * (num_cols - 1))
+            current_group_idx = group_idx
+
+        symbol = item["ticker"].split(":", 1)[-1]
+        row = [symbol] + [_cell_value(k, item, state) for k in valid_keys]
+        table.add_row(*row)
+        row_count += 1
+
+    return table
+
+
+def build_equities_table(state: DashboardState, config: Config, plans: PlanInfo,
+                         equity_groups: list = None) -> Panel:
     freshness = _data_freshness(plans.stocks)
     streaming = state.ws_connected and plans.stocks_has_ws
     subtitle = _market_subtitle(freshness, state, streaming=streaming)
 
-    table = _build_market_table(state.equities, config.equity_cols, EQUITY_COLUMNS, state)
+    if equity_groups:
+        table = _build_grouped_equities_table(state.equities, config.equity_cols,
+                                              EQUITY_COLUMNS, state, equity_groups)
+    else:
+        table = _build_market_table(state.equities, config.equity_cols, EQUITY_COLUMNS, state,
+                                    symbol_width=SYMBOL_MIN_WIDTH["equity"])
     return Panel(table, title="[bold grey70]EQUITIES[/bold grey70]", subtitle=f"[grey46]{subtitle}[/grey46]",
                  subtitle_align="right", border_style="grey70")
 
@@ -221,7 +281,8 @@ def build_crypto_table(state: DashboardState, config: Config, plans: PlanInfo) -
         # Basic plan: daily aggs — show the data date
         subtitle = state.crypto_data_date or freshness
 
-    table = _build_market_table(state.crypto, config.crypto_cols, CRYPTO_COLUMNS, state, large=True)
+    table = _build_market_table(state.crypto, config.crypto_cols, CRYPTO_COLUMNS, state,
+                                    large=True, symbol_width=SYMBOL_MIN_WIDTH["crypto"])
     return Panel(table, title="[bold grey70]CRYPTO[/bold grey70]", subtitle=f"[grey46]{subtitle}[/grey46]",
                  subtitle_align="right", border_style="grey70")
 
@@ -231,7 +292,8 @@ def build_indices_table(state: DashboardState, config: Config, plans: PlanInfo) 
     streaming = state.ws_connected and plans.indices_has_ws
     subtitle = _market_subtitle(freshness, state, streaming=streaming, show_extended=False)
 
-    table = _build_market_table(state.indices, config.index_cols, INDEX_COLUMNS, state, large=True)
+    table = _build_market_table(state.indices, config.index_cols, INDEX_COLUMNS, state,
+                                    large=True, symbol_width=SYMBOL_MIN_WIDTH["index"])
     return Panel(table, title="[bold grey70]INDICES[/bold grey70]", subtitle=f"[grey46]{subtitle}[/grey46]",
                  subtitle_align="right", border_style="grey70")
 
@@ -325,7 +387,14 @@ def build_layout(state: DashboardState, watchlist: Dict[str, List[str]],
     layout = Layout()
 
     # Panel border = 2 rows (top+bottom), so content rows = size - 2
+    equity_groups = watchlist.get("equity_groups", [])
     eq_rows = max(len(state.equities), 1) + 1  # +1 for header row
+    if equity_groups:
+        grouped_tickers = {t for _, tickers in equity_groups for t in tickers}
+        has_ungrouped = any(t not in grouped_tickers for t in watchlist["equities"])
+        # Each group: 1 name row + 1 divider row (except first group if no ungrouped above)
+        num_dividers = len(equity_groups) if has_ungrouped else max(len(equity_groups) - 1, 0)
+        eq_rows += len(equity_groups) + num_dividers
     cr_rows = max(len(state.crypto), 1) + 1
     ix_rows = max(len(state.indices), 1) + 1
 
@@ -344,7 +413,7 @@ def build_layout(state: DashboardState, watchlist: Dict[str, List[str]],
 
     layout["header"].update(make_header(state))
     layout["indices"].update(build_indices_table(state, config, plans))
-    layout["equities"].update(build_equities_table(state, config, plans))
+    layout["equities"].update(build_equities_table(state, config, plans, equity_groups))
     layout["crypto"].update(build_crypto_table(state, config, plans))
 
     bottom = Layout()

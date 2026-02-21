@@ -5,8 +5,7 @@ from datetime import datetime, time as dt_time, timedelta
 from typing import Any, Dict, List
 from zoneinfo import ZoneInfo
 
-from fintra.constants import ALL_YIELD_FIELDS, ECON_CACHE_PATH
-from fintra.formatting import display_name
+from fintra.constants import ECON_CACHE_PATH
 from fintra.plans import PlanInfo
 from fintra.state import DashboardState
 
@@ -64,7 +63,7 @@ def _save_econ_cache(state: DashboardState):
 def _normalize_crypto_agg(agg: Dict[str, Any], prev_agg: Dict[str, Any],
                           ticker: str) -> Dict[str, Any]:
     """Convert crypto agg dict + previous close dict into a flat dict for rendering."""
-    d: Dict[str, Any] = {"ticker": ticker, "name": display_name(ticker)}
+    d: Dict[str, Any] = {"ticker": ticker, "name": ticker}
     d["last"] = agg.get("close")
     d["open"] = agg.get("open")
     d["high"] = agg.get("high")
@@ -144,7 +143,6 @@ def fetch_market_data(provider, watchlist: Dict[str, List[str]],
                 for t in watchlist["equities"]:
                     if t in snap_map:
                         d = snap_map[t]
-                        d["name"] = display_name(t)
                         old_chg = old_eq_changes.get(t)
                         new_chg = d.get("change")
                         if old_chg is not None and new_chg is not None and abs(new_chg - old_chg) > 0.001:
@@ -158,7 +156,6 @@ def fetch_market_data(provider, watchlist: Dict[str, List[str]],
                 for t in watchlist["indices"]:
                     if t in snap_map:
                         d = snap_map[t]
-                        d["name"] = display_name(t)
                         old_chg = old_ix_changes.get(t)
                         new_chg = d.get("change")
                         if old_chg is not None and new_chg is not None and abs(new_chg - old_chg) > 0.001:
@@ -228,7 +225,6 @@ def fetch_crypto_data(provider, watchlist: Dict[str, List[str]],
                 snap_list = provider.fetch_snapshots(crypto_tickers)
                 for d in snap_list:
                     t = d["ticker"]
-                    d["name"] = display_name(t)
                     old_chg = old_crypto_changes.get(t)
                     new_chg = d.get("change")
                     if old_chg is not None and new_chg is not None and abs(new_chg - old_chg) > 0.001:

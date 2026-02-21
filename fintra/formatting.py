@@ -2,8 +2,6 @@ from typing import Optional
 
 from rich.text import Text
 
-from fintra.constants import DISPLAY_NAMES
-
 
 def fmt_price(val: Optional[float], large: bool = False, style: str = "cyan") -> Text:
     if val is None:
@@ -84,13 +82,4 @@ def fmt_ext_pct(val: Optional[float]) -> Optional[Text]:
     return Text(f" ({sign}{val:.2f}%)", style=f"dim {color}")
 
 
-def fmt_ext_price(val: Optional[float], large: bool = False) -> Optional[Text]:
-    """Format extended hours price as dim parenthesized text."""
-    if val is None:
-        return None
-    s = f"{val:,.2f}" if large else f"{val:.2f}"
-    return Text(f" ({s})", style="dim cyan")
 
-
-def display_name(ticker: str) -> str:
-    return DISPLAY_NAMES.get(ticker, ticker)

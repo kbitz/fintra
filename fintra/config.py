@@ -35,9 +35,12 @@ class Config:
 
 
 def _parse_col_list(value: str, available: dict, default: List[str]) -> List[str]:
-    """Parse a comma-separated column list, validating against available columns."""
+    """Parse a comma-separated column list, validating against available columns.
+
+    'symbol' and 'name' are silently stripped — symbol is always prepended by the UI.
+    """
     cols = [c.strip().lower() for c in value.split(",") if c.strip()]
-    valid = [c for c in cols if c in available]
+    valid = [c for c in cols if c in available and c not in ("symbol", "name")]
     return valid if valid else default
 
 
@@ -68,27 +71,49 @@ VALID_SECTIONS = {"equities", "crypto", "indices", "treasury", "economy"}
 
 
 def parse_watchlist(path: str = "") -> Dict[str, List[str]]:
-    """Parse a watchlist file into {equities: [], crypto: [], indices: [], treasury: [], economy: []}."""
+    """Parse a watchlist file into {equities: [], crypto: [], indices: [], treasury: [], economy: []}.
+
+    Within [equities], lines starting with '## ' define named sub-groups.
+    The result includes an 'equity_groups' key: list of (name, [tickers]) tuples.
+    The flat 'equities' list always contains every ticker regardless of grouping.
+    """
     if not path:
         path = os.path.join(WATCHLISTS_DIR, DEFAULT_WATCHLIST)
-    result: Dict[str, List[str]] = {"equities": [], "crypto": [], "indices": [], "treasury": [], "economy": []}
+    result: Dict[str, List[str]] = {
+        "equities": [], "crypto": [], "indices": [], "treasury": [], "economy": [],
+        "equity_groups": [],
+    }
     if not os.path.exists(path):
         print(f"[error] {path} not found")
         sys.exit(1)
 
     current_section = None
+    current_group = None  # mutable: (name, [tickers])
     with open(path, "r") as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith("#"):
+            if not line:
+                continue
+            # Detect equity group headers before generic comment skip
+            if line.startswith("## ") and current_section == "equities":
+                group_name = line[3:].strip()
+                if group_name:
+                    current_group = (group_name, [])
+                    result["equity_groups"].append(current_group)
+                continue
+            if line.startswith("#"):
                 continue
             if line.startswith("[") and line.endswith("]"):
                 section = line[1:-1].lower()
-                if section in result:
+                if section in VALID_SECTIONS:
                     current_section = section
+                    if section != "equities":
+                        current_group = None
                 continue
             if current_section:
                 result[current_section].append(line)
+                if current_section == "equities" and current_group is not None:
+                    current_group[1].append(line)
     return result
 
 

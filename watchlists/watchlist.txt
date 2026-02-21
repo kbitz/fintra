@@ -1,4 +1,5 @@
 [equities]
+## Mag 7
 AAPL
 MSFT
 NVDA
@@ -6,6 +7,13 @@ AMZN
 GOOGL
 META
 TSLA
+
+## Nifty Fifty
+IBM
+KO
+JNJ
+PG
+MCD
 
 [crypto]
 X:BTCUSD

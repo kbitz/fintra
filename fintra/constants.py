@@ -12,29 +12,6 @@ ECON_CACHE_PATH = os.path.join(PROJECT_ROOT, ".econ_cache.json")
 DEFAULT_REFRESH = 10
 DEFAULT_ECONOMY = 86400  # 1 day — economy data changes at most daily
 
-DISPLAY_NAMES = {
-    "I:SPX": "S&P 500",
-    "I:DJI": "Dow Jones",
-    "I:DJA": "Dow Jones",
-    "I:NDX": "Nasdaq 100",
-    "I:VIX": "VIX",
-    "X:BTCUSD": "BTC/USD",
-    "X:ETHUSD": "ETH/USD",
-    "X:SOLUSD": "SOL/USD",
-    "X:XRPUSD": "XRP/USD",
-}
-
-# Map index tickers to their indicesGroups key from get_market_status()
-INDEX_GROUPS = {
-    "I:SPX": "s_and_p",
-    "I:DJI": "dow_jones",
-    "I:DJA": "dow_jones",
-    "I:NDX": "nasdaq",
-    "I:COMP": "nasdaq",
-    "I:VIX": "s_and_p",
-    "I:RUT": "ftse_russell",
-}
-
 ALL_YIELD_FIELDS = {
     "1M": "yield_1_month",
     "3M": "yield_3_month",
@@ -62,9 +39,9 @@ DEFAULT_ECONOMY_KEYS = ["unemployment", "participation", "avg_hourly_wage", "cpi
 
 # Column definitions per section
 # Each column: (header_label, justify, min_width)
+# Column definitions per section (symbol is always prepended automatically)
+# Each column: (header_label, justify, min_width)
 EQUITY_COLUMNS = {
-    "symbol":     ("Symbol", "left", 6),
-    "name":       ("Name", "left", 10),
     "last":       ("Last", "right", 9),
     "chg":        ("Chg", "right", 9),
     "chg%":       ("Chg%", "right", 8),
@@ -78,8 +55,6 @@ EQUITY_COLUMNS = {
 }
 
 INDEX_COLUMNS = {
-    "symbol":     ("Symbol", "left", 8),
-    "name":       ("Name", "left", 20),
     "last":       ("Last", "right", 12),
     "chg":        ("Chg", "right", 10),
     "chg%":       ("Chg%", "right", 8),
@@ -91,13 +66,14 @@ INDEX_COLUMNS = {
 }
 
 CRYPTO_COLUMNS = {
-    "symbol": ("Symbol", "left", 10),
-    "name":   ("Name", "left", 10),
     "last":   ("Last", "right", 14),
     "chg":    ("Chg", "right", 12),
     "chg%":   ("Chg%", "right", 8),
 }
 
-DEFAULT_EQUITY_COLS = ["symbol", "last", "chg", "chg%", "open_close", "high", "low", "vol"]
-DEFAULT_INDEX_COLS = ["name", "last", "chg", "chg%"]
-DEFAULT_CRYPTO_COLS = ["name", "last", "chg", "chg%"]
+# Symbol min-widths per section (symbol column is always first, no header)
+SYMBOL_MIN_WIDTH = {"equity": 6, "index": 8, "crypto": 10}
+
+DEFAULT_EQUITY_COLS = ["last", "chg", "chg%", "open_close", "high", "low", "vol"]
+DEFAULT_INDEX_COLS = ["last", "chg", "chg%"]
+DEFAULT_CRYPTO_COLS = ["last", "chg", "chg%"]
